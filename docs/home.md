@@ -38,6 +38,7 @@ UML（Unified Model Language），统一建模语言。很多讲解面向对象�
 多态可以提高代码的扩展性和复用性，是很多设计模式、设计原则、编程技巧的代码实现基础。
 
 ### 面向对象与面向过程对比
+#### 什么是面向过程编程与面向过程编程语言？
 类比面向对象编程与面向对象编程语言的定义，对于面向过程编程和面向过程编程语言这两个概念:
 > 面向过程编程也是一种编程范式或编程风格。它以过程（可以理解为方法、函数、操作）作为组织代码的基本单元，以数据（可以理解为成员变量、属性）与方法相分离为最主要的特点。面向过程风格是一种流程化的编程风格，通过拼接一组顺序执行的方法来操作数据完成一项功能。
 
@@ -87,8 +88,68 @@ int main(char** args, int argv) {
   format_user_file("/home/zheng/user.txt", "/home/zheng/formatted_users.txt");
 }
 ```
+然后，我们再来看，用面向对象这种编程风格写出来的代码是什么样子的。注意，下面的代码是用 Java 这种面向对象的编程语言来编写的。
+```c
 
+ public class User {
+  private String name;
+  private int age;
+  private String gender;
+  
+  public User(String name, int age, String gender) {
+    this.name = name;
+    this.age = age;
+    this.gender = gender;
+  }
+  
+  public static User praseFrom(String userInfoText) {
+    // 将text(“小王&28&男”)解析成类User
+  }
+  
+  public String formatToText() {
+    // 将类User格式化成文本（"小王\t28\t男"）
+  }
+}
 
+public class UserFileFormatter {
+  public void format(String userFile, String formattedUserFile) {
+    // Open files...
+    List users = new ArrayList<>();
+    while (1) { // read until file is empty 
+      // read from file into userText...
+      User user = User.parseFrom(userText);
+      users.add(user);
+    }
+    // sort users by age...
+    for (int i = 0; i < users.size(); ++i) {
+      String formattedUserText = user.formatToText();
+      // write to new file...
+    }
+    // close files...
+  }
+}
+
+public class MainApplication {
+  public static void main(String[] args) {
+    UserFileFormatter userFileFormatter = new UserFileFormatter();
+    userFileFormatter.format("/home/zheng/users.txt", "/home/zheng/formatted_users.txt");
+  }
+}
+```
+我们可以看出，面向过程和面向对象最基本的区别就是，代码的组织方式不同。**面向过程风格的代码被组织成了一组方法集合及其数据结构（struct User），方法和数据结构的定义是分开的。面向对象风格的代码被组织成一组类，方法和数据结构被绑定一起，定义在类中。**
+#### 面向对象编程相比面向过程编程有哪些优势？
+1. OOP 更加能够应对大规模复杂程序的开发
+对于简单程序的开发来说，不管是用面向过程编程风格，还是用面向对象编程风格，差别确实不会很大，甚至有的时候，面向过程的编程风格反倒更有优势。<u>因为需求足够简单，整个程序的处理流程只有一条主线</u>，很容易被划分成顺序执行的几个步骤，然后逐句翻译成代码，这就非常适合采用面向过程这种面条式的编程风格来实现。
+
+<u>但对于大规模复杂程序的开发来说，整个程序的处理流程错综复杂，并非只有一条主线。如果把整个程序的处理流程画出来的话，会是一个网状结构。</u>如果我们再用面向过程编程这种流程化、线性的思维方式，去翻译这个网状结构，去思考如何把程序拆解为一组顺序执行的方法，就会比较吃力。这个时候，面向对象的编程风格的优势就比较明显了。
+
+面向对象编程是以类为思考对象。在进行面向对象编程的时候，我们并不是一上来就去思考，如何将复杂的流程拆解为一个一个方法，而是采用曲线救国的策略，先去思考如何给业务建模，如何将需求翻译为类，如何给类之间建立交互关系，而完成这些工作完全不需要考虑错综复杂的处理流程。当我们有了类的设计之后，然后再像搭积木一样，按照处理流程，将类组装起来形成整个程序。这种开发模式、思考问题的方式，能让我们在应对复杂程序开发的时候，思路更加清晰。
+
+除此之外，面向对象编程还提供了一种更加清晰的、更加模块化的代码组织方式。比如，我们开发一个电商交易系统，业务逻辑复杂，代码量很大，可能要定义数百个函数、数百个数据结构，那如何分门别类地组织这些函数和数据结构，才能不至于看起来比较凌乱呢？类就是一种非常好的组织这些函数和数据结构的方式，是一种将代码模块化的有效手段。
+
+你可能会说，像 C 语言这种面向过程的编程语言，我们也可以按照功能的不同，把函数和数据结构放到不同的文件里，以达到给函数和数据结构分类的目的，照样可以实现代码的模块化。你说得没错。只不过面向对象编程本身提供了类的概念，强制你做这件事情，而面向过程编程并不强求。这也算是面向对象编程相对于面向过程编程的一个微创新吧。
+
+实际上，利用面向过程的编程语言照样可以写出面向对象风格的代码，只不过可能会比用面向对象编程语言来写面向对象风格的代码，付出的代价要高一些。而且，面向过程编程和面向对象编程并非完全对立的。很多软件开发中，尽管利用的是面向过程的编程语言，也都有借鉴面向对象编程的一些优点。
 # PHP
 
 ## 介绍与安装
