@@ -299,4 +299,590 @@ public class PageAnalyzer {
 }
 ```
 
-### 实战一：基于贫血模型的MVC架构违背OOP吗？
+### 贫血模型与充血模型？
+#### 什么是基于贫血模型的传统开发模式？
+MVC 三层架构中的 M 表示 Model，V 表示 View，C 表示 Controller。它将整个项目分为三层：展示层、逻辑层、数据层。MVC 三层开发架构是一个比较笼统的分层方式，落实到具体的开发层面，很多项目也并不会 100% 遵从 MVC 固定的分层方式，而是会根据具体的项目需求，做适当的调整。
+
+比如，现在很多 Web 或者 App 项目都是前后端分离的，后端负责暴露接口给前端调用。这种情况下，我们一般就将后端项目分为 Repository 层、Service 层、Controller 层。其中，Repository 层负责数据访问，Service 层负责业务逻辑，Controller 层负责暴露接口。
+```java
+
+////////// Controller+VO(View Object) //////////
+public class UserController {
+  private UserService userService; //通过构造函数或者IOC框架注入
+  
+  public UserVo getUserById(Long userId) {
+    UserBo userBo = userService.getUserById(userId);
+    UserVo userVo = [...convert userBo to userVo...];
+    return userVo;
+  }
+}
+
+public class UserVo {//省略其他属性、get/set/construct方法
+  private Long id;
+  private String name;
+  private String cellphone;
+}
+
+////////// Service+BO(Business Object) //////////
+public class UserService {
+  private UserRepository userRepository; //通过构造函数或者IOC框架注入
+  
+  public UserBo getUserById(Long userId) {
+    UserEntity userEntity = userRepository.getUserById(userId);
+    UserBo userBo = [...convert userEntity to userBo...];
+    return userBo;
+  }
+}
+
+public class UserBo {//省略其他属性、get/set/construct方法
+  private Long id;
+  private String name;
+  private String cellphone;
+}
+
+////////// Repository+Entity //////////
+public class UserRepository {
+  public UserEntity getUserById(Long userId) { //... }
+}
+
+public class UserEntity {//省略其他属性、get/set/construct方法
+  private Long id;
+  private String name;
+  private String cellphone;
+}
+```
+我们平时开发 Web 后端项目的时候，基本上都是这么组织代码的。其中，UserEntity 和 UserRepository 组成了数据访问层，UserBo 和 UserService 组成了业务逻辑层，UserVo 和 UserController 在这里属于接口层。
+
+<u>像 UserBo 这样，只包含数据，不包含业务逻辑的类，就叫作贫血模型（Anemic Domain Model）。同理，UserEntity、UserVo 都是基于贫血模型设计的。这种贫血模型将数据与操作分离，破坏了面向对象的封装特性，是一种典型的面向过程的编程风格。</u>
+
+#### 什么是充血模型？
+充血模型（Rich Domain Model），数据和对应的业务逻辑被封装到同一个类中。因此，这种充血模型满足面向对象的封装特性，是典型的面向对象编程风格。
+
+#### 什么是基于充血模型的 DDD 开发模式？
+领域驱动设计，即 DDD，主要是用来指导如何解耦业务系统，划分业务模块，定义业务领域模型及其交互。
+
+实际上，基于充血模型的 DDD 开发模式实现的代码，也是按照 MVC 三层架构分层的。Controller 层还是负责暴露接口，Repository 层还是负责数据存取，Service 层负责核心业务逻辑。它跟基于贫血模型的传统开发模式的区别主要在 Service 层。
+
+<u>在基于贫血模型的传统开发模式中，Service 层包含 Service 类和 BO 类两部分，BO 是贫血模型，只包含数据，不包含具体的业务逻辑。业务逻辑集中在 Service 类中。在基于充血模型的 DDD 开发模式中，Service 层包含 Service 类和 Domain 类两部分。Domain 就相当于贫血模型中的 BO。不过，Domain 与 BO 的区别在于它是基于充血模型开发的，既包含数据，也包含业务逻辑。而 Service 类变得非常单薄。总结一下的话就是，基于贫血模型的传统的开发模式，重 Service 轻 BO；基于充血模型的 DDD 开发模式，轻 Service 重 Domain。</u>
+
+不过，DDD 也并非银弹。对于业务不复杂的系统开发来说，基于贫血模型的传统开发模式简单够用，基于充血模型的 DDD 开发模式有点大材小用，无法发挥作用。相反，对于业务复杂的系统开发来说，基于充血模型的 DDD 开发模式，因为前期需要在设计上投入更多时间和精力，来提高代码的复用性和可维护性，所以相比基于贫血模型的开发模式，更加有优势。
+
+### 实战一:利用DDD开发一个虚拟钱包系统？
+#### 钱包业务背景介绍
+为了方便后续的讲解，我们限定钱包暂时只支持充值、提现、支付、查询余额、查询交易流水这五个核心的功能，其他比如冻结、透支、转赠等不常用的功能，我们暂不考虑。
+
+1. 充值
+用户通过三方支付渠道，把自己银行卡账户内的钱，充值到虚拟钱包账号中。这整个过程，我们可以分解为三个主要的操作流程：第一个操作是从用户的银行卡账户转账到应用的公共银行卡账户；第二个操作是将用户的充值金额加到虚拟钱包余额上；第三个操作是记录刚刚这笔交易流水。
+
+2. 支付
+用户用钱包内的余额，支付购买应用内的商品。实际上，支付的过程就是一个转账的过程，从用户的虚拟钱包账户划钱到商家的虚拟钱包账户上。除此之外，我们也需要记录这笔支付的交易流水信息。
+
+3. 提现
+除了充值、支付之外，用户还可以将虚拟钱包中的余额，提现到自己的银行卡中。这个过程实际上就是扣减用户虚拟钱包中的余额，并且触发真正的银行转账操作，从应用的公共银行账户转钱到用户的银行账户。同样，我们也需要记录这笔提现的交易流水信息。
+
+4. 查询余额
+查询余额功能比较简单，我们看一下虚拟钱包中的余额数字即可。
+
+5. 查询交易流水
+我们只支持三种类型的交易流水：充值、支付、提现。在用户充值、支付、提现的时候，我们会记录相应的交易信息。在需要查询的时候，我们只需要将之前记录的交易流水，按照时间、类型等条件过滤之后，显示出来即可。
+
+#### 钱包系统的设计思路
+我们可以把整个钱包系统的业务划分为两部分，其中一部分单纯跟应用内的虚拟钱包账户打交道，另一部分单纯跟银行账户打交道。我们基于这样一个业务划分，给系统解耦，将整个钱包系统拆分为两个子系统：虚拟钱包系统和三方支付系统。
+
+我们接来下只聚焦于虚拟钱包系统的设计与实现。对于三方支付系统以及整个钱包系统的设计与实现，我们不做讲解。你可以自己思考下。
+
+现在我们来看下，如果要支持钱包的这五个核心功能，虚拟钱包系统需要对应实现哪些操作。
+![](_images/1-4.png)
+从图中我们可以看出，虚拟钱包系统要支持的操作非常简单，就是余额的加加减减。其中，充值、提现、查询余额三个功能，只涉及一个账户余额的加减操作，而支付功能涉及两个账户的余额加减操作：一个账户减余额，另一个账户加余额。
+![](_images/1-5.png)
+从图中我们可以发现，交易流水的数据格式包含两个钱包账号，一个是入账钱包账号，一个是出账钱包账号。为什么要有两个账号信息呢？这主要是为了兼容支付这种涉及两个账户的交易类型。不过，对于充值、提现这两种交易类型来说，我们只需要记录一个钱包账户信息就够了。
+
+接下来，我们来看一下，如何分别用基于贫血模型的传统开发模式和基于充血模型的 DDD 开发模式，来实现这样一个虚拟钱包系统？
+
+#### 基于贫血模型的传统开发模式
+这是一个典型的 Web 后端项目的三层结构。其中，Controller 和 VO 负责暴露接口，具体的代码实现如下所示。注意，Controller 中，接口实现比较简单，主要就是调用 Service 的方法，所以，我省略了具体的代码实现。
+```java
+
+public class VirtualWalletController {
+  // 通过构造函数或者IOC框架注入
+  private VirtualWalletService virtualWalletService;
+  
+  public BigDecimal getBalance(Long walletId) { ... } //查询余额
+  public void debit(Long walletId, BigDecimal amount) { ... } //出账
+  public void credit(Long walletId, BigDecimal amount) { ... } //入账
+  public void transfer(Long fromWalletId, Long toWalletId, BigDecimal amount) { ...} //转账
+  //省略查询transaction的接口
+}
+```
+Service 和 BO 负责核心业务逻辑，Repository 和 Entity 负责数据存取。Repository 这一层的代码实现比较简单，不是我们讲解的重点，所以我也省略掉了。Service 层的代码如下所示。注意，这里我省略了一些不重要的校验代码，比如，对 amount 是否小于 0、钱包是否存在的校验等等。
+```java
+
+public class VirtualWalletBo {//省略getter/setter/constructor方法
+  private Long id;
+  private Long createTime;
+  private BigDecimal balance;
+}
+
+public Enum TransactionType {
+  DEBIT,
+  CREDIT,
+  TRANSFER;
+}
+
+public class VirtualWalletService {
+  // 通过构造函数或者IOC框架注入
+  private VirtualWalletRepository walletRepo;
+  private VirtualWalletTransactionRepository transactionRepo;
+  
+  public VirtualWalletBo getVirtualWallet(Long walletId) {
+    VirtualWalletEntity walletEntity = walletRepo.getWalletEntity(walletId);
+    VirtualWalletBo walletBo = convert(walletEntity);
+    return walletBo;
+  }
+  
+  public BigDecimal getBalance(Long walletId) {
+    return walletRepo.getBalance(walletId);
+  }
+
+  @Transactional
+  public void debit(Long walletId, BigDecimal amount) {
+    VirtualWalletEntity walletEntity = walletRepo.getWalletEntity(walletId);
+    BigDecimal balance = walletEntity.getBalance();
+    if (balance.compareTo(amount) < 0) {
+      throw new NoSufficientBalanceException(...);
+    }
+    VirtualWalletTransactionEntity transactionEntity = new VirtualWalletTransactionEntity();
+    transactionEntity.setAmount(amount);
+    transactionEntity.setCreateTime(System.currentTimeMillis());
+    transactionEntity.setType(TransactionType.DEBIT);
+    transactionEntity.setFromWalletId(walletId);
+    transactionRepo.saveTransaction(transactionEntity);
+    walletRepo.updateBalance(walletId, balance.subtract(amount));
+  }
+
+  @Transactional
+  public void credit(Long walletId, BigDecimal amount) {
+    VirtualWalletTransactionEntity transactionEntity = new VirtualWalletTransactionEntity();
+    transactionEntity.setAmount(amount);
+    transactionEntity.setCreateTime(System.currentTimeMillis());
+    transactionEntity.setType(TransactionType.CREDIT);
+    transactionEntity.setFromWalletId(walletId);
+    transactionRepo.saveTransaction(transactionEntity);
+    VirtualWalletEntity walletEntity = walletRepo.getWalletEntity(walletId);
+    BigDecimal balance = walletEntity.getBalance();
+    walletRepo.updateBalance(walletId, balance.add(amount));
+  }
+
+  @Transactional
+  public void transfer(Long fromWalletId, Long toWalletId, BigDecimal amount) {
+    VirtualWalletTransactionEntity transactionEntity = new VirtualWalletTransactionEntity();
+    transactionEntity.setAmount(amount);
+    transactionEntity.setCreateTime(System.currentTimeMillis());
+    transactionEntity.setType(TransactionType.TRANSFER);
+    transactionEntity.setFromWalletId(fromWalletId);
+    transactionEntity.setToWalletId(toWalletId);
+    transactionRepo.saveTransaction(transactionEntity);
+    debit(fromWalletId, amount);
+    credit(toWalletId, amount);
+  }
+}
+```
+#### 基于充血模型的 DDD 开发模式
+基于充血模型的 DDD 开发模式，跟基于贫血模型的传统开发模式的主要区别就在 Service 层，Controller 层和 Repository 层的代码基本上相同
+
+在这种开发模式下，我们把虚拟钱包 VirtualWallet 类设计成一个充血的 Domain 领域模型，并且将原来在 Service 类中的部分业务逻辑移动到 VirtualWallet 类中，让 Service 类的实现依赖 VirtualWallet 类。具体的代码实现如下所示：
+```java
+
+public class VirtualWallet { // Domain领域模型(充血模型)
+  private Long id;
+  private Long createTime = System.currentTimeMillis();;
+  private BigDecimal balance = BigDecimal.ZERO;
+  
+  public VirtualWallet(Long preAllocatedId) {
+    this.id = preAllocatedId;
+  }
+  
+  public BigDecimal balance() {
+    return this.balance;
+  }
+  
+  public void debit(BigDecimal amount) {
+    if (this.balance.compareTo(amount) < 0) {
+      throw new InsufficientBalanceException(...);
+    }
+    this.balance = this.balance.subtract(amount);
+  }
+  
+  public void credit(BigDecimal amount) {
+    if (amount.compareTo(BigDecimal.ZERO) < 0) {
+      throw new InvalidAmountException(...);
+    }
+    this.balance = this.balance.add(amount);
+  }
+}
+
+public class VirtualWalletService {
+  // 通过构造函数或者IOC框架注入
+  private VirtualWalletRepository walletRepo;
+  private VirtualWalletTransactionRepository transactionRepo;
+  
+  public VirtualWallet getVirtualWallet(Long walletId) {
+    VirtualWalletEntity walletEntity = walletRepo.getWalletEntity(walletId);
+    VirtualWallet wallet = convert(walletEntity);
+    return wallet;
+  }
+  
+  public BigDecimal getBalance(Long walletId) {
+    return walletRepo.getBalance(walletId);
+  }
+  
+  @Transactional
+  public void debit(Long walletId, BigDecimal amount) {
+    VirtualWalletEntity walletEntity = walletRepo.getWalletEntity(walletId);
+    VirtualWallet wallet = convert(walletEntity);
+    wallet.debit(amount);
+    VirtualWalletTransactionEntity transactionEntity = new VirtualWalletTransactionEntity();
+    transactionEntity.setAmount(amount);
+    transactionEntity.setCreateTime(System.currentTimeMillis());
+    transactionEntity.setType(TransactionType.DEBIT);
+    transactionEntity.setFromWalletId(walletId);
+    transactionRepo.saveTransaction(transactionEntity);
+    walletRepo.updateBalance(walletId, wallet.balance());
+  }
+  
+  @Transactional
+  public void credit(Long walletId, BigDecimal amount) {
+    VirtualWalletEntity walletEntity = walletRepo.getWalletEntity(walletId);
+    VirtualWallet wallet = convert(walletEntity);
+    wallet.credit(amount);
+    VirtualWalletTransactionEntity transactionEntity = new VirtualWalletTransactionEntity();
+    transactionEntity.setAmount(amount);
+    transactionEntity.setCreateTime(System.currentTimeMillis());
+    transactionEntity.setType(TransactionType.CREDIT);
+    transactionEntity.setFromWalletId(walletId);
+    transactionRepo.saveTransaction(transactionEntity);
+    walletRepo.updateBalance(walletId, wallet.balance());
+  }
+
+  @Transactional
+  public void transfer(Long fromWalletId, Long toWalletId, BigDecimal amount) {
+    //...跟基于贫血模型的传统开发模式的代码一样...
+  }
+}
+
+```
+看了上面的代码，你可能会说，领域模型 VirtualWallet 类很单薄，包含的业务逻辑很简单。相对于原来的贫血模型的设计思路，这种充血模型的设计思路，貌似并没有太大优势。你说得没错！这也是大部分业务系统都使用基于贫血模型开发的原因。不过，如果虚拟钱包系统需要支持更复杂的业务逻辑，那充血模型的优势就显现出来了。比如，我们要支持透支一定额度和冻结部分余额的功能。这个时候，我们重新来看一下 VirtualWallet 类的实现代码。
+```java
+
+public class VirtualWallet {
+  private Long id;
+  private Long createTime = System.currentTimeMillis();;
+  private BigDecimal balance = BigDecimal.ZERO;
+  private boolean isAllowedOverdraft = true;
+  private BigDecimal overdraftAmount = BigDecimal.ZERO;
+  private BigDecimal frozenAmount = BigDecimal.ZERO;
+  
+  public VirtualWallet(Long preAllocatedId) {
+    this.id = preAllocatedId;
+  }
+  
+  public void freeze(BigDecimal amount) { ... }
+  public void unfreeze(BigDecimal amount) { ...}
+  public void increaseOverdraftAmount(BigDecimal amount) { ... }
+  public void decreaseOverdraftAmount(BigDecimal amount) { ... }
+  public void closeOverdraft() { ... }
+  public void openOverdraft() { ... }
+  
+  public BigDecimal balance() {
+    return this.balance;
+  }
+  
+  public BigDecimal getAvaliableBalance() {
+    BigDecimal totalAvaliableBalance = this.balance.subtract(this.frozenAmount);
+    if (isAllowedOverdraft) {
+      totalAvaliableBalance += this.overdraftAmount;
+    }
+    return totalAvaliableBalance;
+  }
+  
+  public void debit(BigDecimal amount) {
+    BigDecimal totalAvaliableBalance = getAvaliableBalance();
+    if (totoalAvaliableBalance.compareTo(amount) < 0) {
+      throw new InsufficientBalanceException(...);
+    }
+    this.balance = this.balance.subtract(amount);
+  }
+  
+  public void credit(BigDecimal amount) {
+    if (amount.compareTo(BigDecimal.ZERO) < 0) {
+      throw new InvalidAmountException(...);
+    }
+    this.balance = this.balance.add(amount);
+  }
+}
+
+```
+领域模型 VirtualWallet 类添加了简单的冻结和透支逻辑之后，功能看起来就丰富了很多，代码也没那么单薄了。如果功能继续演进，我们可以增加更加细化的冻结策略、透支策略、支持钱包账号（VirtualWallet id 字段）自动生成的逻辑（不是通过构造函数经外部传入 ID，而是通过分布式 ID 生成算法来自动生成 ID）等等。VirtualWallet 类的业务逻辑会变得越来越复杂，也就很值得设计成充血模型了。
+
+#### 思辨：在基于充血模型的 DDD 开发模式中，将业务逻辑移动到 Domain 中，Service 类变得很薄，但在我们的代码设计与实现中，并没有完全将 Service 类去掉，这是为什么？或者说，Service 类在这种情况下担当的职责是什么？哪些功能逻辑会放到 Service 类中？
+
+区别于 Domain 的职责，Service 类主要有下面这样几个职责。
+
+1. <u>Service 类负责与 Repository 交流。在我的设计与代码实现中，VirtualWalletService 类负责与 Repository 层打交道，调用 Respository 类的方法，获取数据库中的数据，转化成领域模型 VirtualWallet，然后由领域模型 VirtualWallet 来完成业务逻辑，最后调用 Repository 类的方法，将数据存回数据库。</u>
+
+这里我再稍微解释一下，之所以让 VirtualWalletService 类与 Repository 打交道，而不是让领域模型 VirtualWallet 与 Repository 打交道，那是因为我们想保持领域模型的独立性，不与任何其他层的代码（Repository 层的代码）或开发框架（比如 Spring、MyBatis）耦合在一起，将流程性的代码逻辑（比如从 DB 中取数据、映射数据）与领域模型的业务逻辑解耦，让领域模型更加可复用。
+
+2. Service 类负责跨领域模型的业务聚合功能。VirtualWalletService 类中的 transfer() 转账函数会涉及两个钱包的操作，因此这部分业务逻辑无法放到 VirtualWallet 类中，所以，我们暂且把转账业务放到 VirtualWalletService 类中了。当然，虽然功能演进，使得转账业务变得复杂起来之后，我们也可以将转账业务抽取出来，设计成一个独立的领域模型。
+
+3. Service 类负责一些非功能性及与三方系统交互的工作。比如幂等、事务、发邮件、发消息、记录日志、调用其他系统的 RPC 接口等，都可以放到 Service 类中。
+
+### 实战二:利用面向对象开发接口鉴权功能
+面向对象分析（OOA）、面向对象设计（OOD）、面向对象编程（OOP），是面向对象开发的三个主要环节。
+
+#### 案例介绍和难点剖析
+假设，你正在参与开发一个微服务。微服务通过 HTTP 协议暴露接口给其他系统调用，说直白点就是，其他系统通过 URL 来调用微服务的接口。有一天，你的 leader 找到你说，“为了保证接口调用的安全性，我们希望设计实现一个接口调用鉴权功能，只有经过认证之后的系统才能调用我们的接口，没有认证过的系统调用我们的接口会被拒绝。我希望由你来负责这个任务的开发，争取尽快上线。”leader 丢下这些话就走了。这个时候，你该如何来做呢？有没有脑子里一团浆糊，一时间无从下手的感觉呢？为什么会有这种感觉呢？我个人觉得主要有下面两点原因。
+
+##### 1. 需求不明确
+
+leader 给到的需求过于模糊、笼统，不够具体、细化，离落地到设计、编码还有一定的距离。而人的大脑不擅长思考这种过于抽象的问题。这也是真实的软件开发区别于应试教育的地方。应试教育中的考试题目，一般都是一个非常具体的问题，我们去解答就好了。而真实的软件开发中，需求几乎都不是很明确。我们前面讲过，面向对象分析主要的分析对象是“需求”，因此，面向对象分析可以粗略地看成“需求分析”。实际上，不管是需求分析还是面向对象分析，我们首先要做的都是将笼统的需求细化到足够清晰、可执行。我们需要通过沟通、挖掘、分析、假设、梳理，搞清楚具体的需求有哪些，哪些是现在要做的，哪些是未来可能要做的，哪些是不用考虑做的。
+
+##### 2. 缺少锻炼
+
+相比单纯的业务 CRUD 开发，鉴权这个开发任务，要更有难度。鉴权作为一个跟具体业务无关的功能，我们完全可以把它开发成一个独立的框架，集成到很多业务系统中。而作为被很多系统复用的通用框架，比起普通的业务代码，我们对框架的代码质量要求要更高。
+
+#### 一、对案例进行需求分析
+实际上，这跟做算法题类似，先从最简单的方案想起，然后再优化。所以，我把整个的分析过程分为了循序渐进的四轮。每一轮都是对上一轮的迭代优化，最后形成一个可执行、可落地的需求列表。
+
+##### 1. 第一轮基础分析
+
+对于如何做鉴权这样一个问题，最简单的解决方案就是，通过用户名加密码来做认证。我们给每个允许访问我们服务的调用方，派发一个应用名（或者叫应用 ID、AppID）和一个对应的密码（或者叫秘钥）。调用方每次进行接口请求的时候，都携带自己的 AppID 和密码。微服务在接收到接口调用请求之后，会解析出 AppID 和密码，跟存储在微服务端的 AppID 和密码进行比对。如果一致，说明认证成功，则允许接口调用请求；否则，就拒绝接口调用请求。
+
+##### 2. 第二轮分析优化
+
+不过，这样的验证方式，每次都要明文传输密码。密码很容易被截获，是不安全的。那如果我们借助加密算法（比如 SHA），对密码进行加密之后，再传递到微服务端验证，是不是就可以了呢？实际上，这样也是不安全的，因为加密之后的密码及 AppID，照样可以被未认证系统（或者说黑客）截获，未认证系统可以携带这个加密之后的密码以及对应的 AppID，伪装成已认证系统来访问我们的接口。这就是典型的**“重放攻击”**。
+
+提出问题，然后再解决问题，是一个非常好的迭代优化方法。对于刚刚这个问题，我们可以借助 OAuth 的验证思路来解决。调用方将请求接口的 URL 跟 AppID、密码拼接在一起，然后进行加密，生成一个 token。调用方在进行接口请求的的时候，将这个 token 及 AppID，随 URL 一块传递给微服务端。微服务端接收到这些数据之后，根据 AppID 从数据库中取出对应的密码，并通过同样的 token 生成算法，生成另外一个 token。用这个新生成的 token 跟调用方传递过来的 token 对比。如果一致，则允许接口调用请求；否则，就拒绝接口调用请求。
+
+##### 3. 第三轮分析优化
+
+不过，这样的设计仍然存在重放攻击的风险，还是不够安全。每个 URL 拼接上 AppID、密码生成的 token 都是固定的。未认证系统截获 URL、token 和 AppID 之后，还是可以通过重放攻击的方式，伪装成认证系统，调用这个 URL 对应的接口。
+
+为了解决这个问题，我们可以进一步优化 token 生成算法，引入一个随机变量，让每次接口请求生成的 token 都不一样。我们可以选择时间戳作为随机变量。原来的 token 是对 URL、AppID、密码三者进行加密生成的，现在我们将 URL、AppID、密码、时间戳四者进行加密来生成 token。调用方在进行接口请求的时候，将 token、AppID、时间戳，随 URL 一并传递给微服务端。
+
+<u>微服务端在收到这些数据之后，会验证当前时间戳跟传递过来的时间戳，是否在一定的时间窗口内（比如一分钟）。如果超过一分钟，则判定 token 过期，拒绝接口请求。如果没有超过一分钟，则说明 token 没有过期，就再通过同样的 token 生成算法，在服务端生成新的 token，与调用方传递过来的 token 比对，看是否一致。如果一致，则允许接口调用请求；否则，就拒绝接口调用请求。</u>
+![](_images/1-6.png)
+
+##### 4. 第四轮分析优化
+
+不过，你可能会说，这样还是不够安全啊。未认证系统还是可以在这一分钟的 token 失效窗口内，通过截获请求、重放请求，来调用我们的接口啊！你说得没错。不过，攻与防之间，本来就没有绝对的安全。我们能做的就是，尽量提高攻击的成本。这个方案虽然还有漏洞，但是实现起来足够简单，而且不会过度影响接口本身的性能（比如响应时间）。所以，权衡安全性、开发成本、对系统性能的影响，这个方案算是比较折中、比较合理的了。
+
+实际上，还有一个细节我们没有考虑到，那就是，如何在微服务端存储每个授权调用方的 AppID 和密码。当然，这个问题并不难。最容易想到的方案就是存储到数据库里，比如 MySQL。不过，开发像鉴权这样的非业务功能，最好不要与具体的第三方系统有过度的耦合。
+
+针对 AppID 和密码的存储，我们最好能灵活地支持各种不同的存储方式，比如 ZooKeeper、本地配置文件、自研配置中心、MySQL、Redis 等。我们不一定针对每种存储方式都去做代码实现，但起码要留有扩展点，保证系统有足够的灵活性和扩展性，能够在我们切换存储方式的时候，尽可能地减少代码的改动。
+
+##### 5. 最终确定需求
+
+最终需求描述：
+- 调用方进行接口请求的时候，将 URL、AppID、密码、时间戳拼接在一起，通过加密算法生成 token，并且将 token、AppID、时间戳拼接在 URL 中，一并发送到微服务端。
+- 微服务端在接收到调用方的接口请求之后，从请求中拆解出 token、AppID、时间戳。
+- 微服务端首先检查传递过来的时间戳跟当前时间，是否在 token 失效时间窗口内。如果已经超过失效时间，那就算接口调用鉴权失败，拒绝接口调用请求。
+- 如果 token 验证没有过期失效，微服务端再从自己的存储中，取出 AppID 对应的密码，通过同样的 token 生成算法，生成另外一个 token，与调用方传递过来的 token 进行匹配；如果一致，则鉴权成功，允许接口调用，否则就拒绝接口调用。
+
+这就是我们需求分析的整个思考过程，从最粗糙、最模糊的需求开始，通过“提出问题 - 解决问题”的方式，循序渐进地进行优化，最后得到一个足够清晰、可落地的需求描述。
+
+#### 二、如何进行面向对象设计？
+面向对象分析的产出是详细的需求描述，那面向对象设计的产出就是类。主要包含以下几个部分：
+- 划分职责进而识别出有哪些类；
+- 定义类及其属性和方法；
+- 定义类与类之间的交互关系；
+- 将类组装起来并提供执行入口。
+
+##### 1. 划分职责进而识别出有哪些类
+
+**根据需求描述，把其中涉及的功能点，一个一个罗列出来，然后再去看哪些功能点职责相近，操作同样的属性，是否应该归为同一个类。**
+
+拆解出来的每个功能点要尽可能的小。每个功能点只负责做一件很小的事情（专业叫法是“单一职责”）。得到的功能点列表：
+- 把 URL、AppID、密码、时间戳拼接为一个字符串；
+- 对字符串通过加密算法加密生成 token；
+- 将 token、AppID、时间戳拼接到 URL 中，形成新的 URL；
+- 解析 URL，得到 token、AppID、时间戳等信息；
+- 从存储中取出 AppID 和对应的密码；
+- 根据时间戳判断 token 是否过期失效；
+- 验证两个 token 是否匹配；
+
+从上面的功能列表中，我们发现，1、2、6、7 都是跟 token 有关，负责 token 的生成、验证；3、4 都是在处理 URL，负责 URL 的拼接、解析；5 是操作 AppID 和密码，负责从存储中读取 AppID 和密码。所以，我们可以粗略地得到三个核心的类：AuthToken、Url、CredentialStorage。AuthToken 负责实现 1、2、6、7 这四个操作；Url 负责 3、4 两个操作；CredentialStorage 负责 5 这个操作。
+
+对复杂的需求开发，我们首先要做的是进行模块划分，将需求先简单划分成几个小的、独立的功能模块，然后再在模块内部，应用我们刚刚讲的方法，进行面向对象设计。而模块的划分和识别，跟类的划分和识别，是类似的套路。
+
+##### 2. 定义类及其属性和方法
+
+**AuthToken 类相关的功能点有四个：**
+- 把 URL、AppID、密码、时间戳拼接为一个字符串；
+- 对字符串通过加密算法加密生成 token；
+- 根据时间戳判断 token 是否过期失效；
+- 验证两个 token 是否匹配。
+
+对于方法的识别，很多面向对象相关的书籍，一般都是这么讲的，<u>识别出需求描述中的动词，作为候选的方法，再进一步过滤筛选。类比一下方法的识别，我们可以把功能点中涉及的名词，作为候选属性，然后同样进行过滤筛选。</u>
+
+我们可以借用这个思路，根据功能点描述，识别出来 AuthToken 类的属性和方法，如下所示：
+![](_images/1-7.png)
+从上面的类图中，我们可以发现这样三个小细节。
+
+- 第一个细节：并不是所有出现的名词都被定义为类的属性，比如 URL、AppID、密码、时间戳这几个名词，我们把它作为了方法的参数。
+- 第二个细节：我们还需要挖掘一些没有出现在功能点描述中属性，比如 createTime，expireTimeInterval，它们用在 isExpired() 函数中，用来判定 token 是否过期。
+- 第三个细节：我们还给 AuthToken 类添加了一个功能点描述中没有提到的方法 getToken()。
+
+第一个细节告诉我们，从业务模型上来说，不应该属于这个类的属性和方法，不应该被放到这个类里。比如 URL、AppID 这些信息，从业务模型上来说，不应该属于 AuthToken，所以我们不应该放到这个类中。
+
+第二、第三个细节告诉我们，在设计类具有哪些属性和方法的时候，不能单纯地依赖当下的需求，还要分析这个类从业务模型上来讲，理应具有哪些属性和方法。这样可以一方面保证类定义的完整性，另一方面不仅为当下的需求还为未来的需求做些准备。
+
+**Url 类相关的功能点有两个：**
+- 将 token、AppID、时间戳拼接到 URL 中，形成新的 URL；
+- 解析 URL，得到 token、AppID、时间戳等信息。
+
+虽然需求描述中，我们都是以 URL 来代指接口请求，但是，接口请求并不一定是以 URL 的形式来表达，还有可能是 Dubbo、RPC 等其他形式。为了让这个类更加通用，命名更加贴切，我们接下来把它命名为 ApiRequest。下面是我根据功能点描述设计的 ApiRequest 类。
+![](_images/1-8.png)
+
+**CredentialStorage 类相关的功能点有一个：**
+- 从存储中取出 AppID 和对应的密码
+
+CredentialStorage 类非常简单，类图如下所示。为了做到抽象封装具体的存储方式，我们将 CredentialStorage 设计成了接口，基于接口而非具体的实现编程。
+![](_images/1-9.png)
+
+##### 3. 定义类与类之间的交互关系
+
+**UML 统一建模语言中定义了六种类之间的关系。它们分别是：泛化、实现、关联、聚合、组合、依赖。**
+
+我们从更加贴近编程的角度，对类与类之间的关系做了调整，只保留了四个关系：<u>泛化、实现、组合、依赖</u>，这样你掌握起来会更加容易。
+
+其中，泛化、实现、依赖的定义不变，组合关系替代 UML 中组合、聚合、关联三个概念，也就相当于重新命名关联关系为组合关系，并且不再区分 UML 中的组合和聚合两个概念。之所以这样重新命名，是为了跟我们前面讲的“多用组合少用继承”设计原则中的“组合”统一含义。<u>只要 B 类对象是 A 类对象的成员变量，那我们就称，A 类跟 B 类是组合关系。</u>
+
+**泛化**（Generalization）可以简单理解为继承关系。具体到 Java 代码就是下面这样：
+```java
+public class A { ... }
+public class B extends A { ... }
+```
+
+**实现**（Realization）一般是指接口和实现类之间的关系。具体到 Java 代码就是下面这样：
+```java
+public interface A {...}
+public class B implements A { ... }
+```
+
+**聚合**（Aggregation）是一种包含关系，A 类对象包含 B 类对象，B 类对象的生命周期可以不依赖 A 类对象的生命周期，<u>也就是说可以单独销毁 A 类对象而不影响 B 对象</u>，比如课程与学生之间的关系。具体到 Java 代码就是下面这样：
+```java
+public class A {
+  private B b;
+  public A(B b) {
+    this.b = b;
+  }
+}
+```
+
+**组合**（Composition）也是一种包含关系。A 类对象包含 B 类对象，B 类对象的生命周期依赖 A 类对象的生命周期，<u>B 类对象不可单独存在</u>，比如鸟与翅膀之间的关系。具体到 Java 代码就是下面这样：
+```java
+public class A {
+  private B b;
+  public A() {
+    this.b = new B();
+  }
+}
+```
+
+**关联**（Association）是一种非常弱的关系，包含聚合、组合两种关系。具体到代码层面，如果 B 类对象是 A 类的成员变量，那 B 类和 A 类就是关联关系。具体到 Java 代码就是下面这样：
+```java
+public class A {
+  private B b;
+  public A(B b) {
+    this.b = b;
+  }
+}
+或者
+public class A {
+  private B b;
+  public A() {
+    this.b = new B();
+  }
+}
+```
+
+**依赖**（Dependency）是一种比关联关系更加弱的关系，包含关联关系。不管是 B 类对象是 A 类对象的成员变量，还是 A 类的方法使用 B 类对象作为参数或者返回值、局部变量，只要 B 类对象和 A 类对象有任何使用关系，我们都称它们有依赖关系。具体到 Java 代码就是下面这样：
+```java
+public class A {
+  private B b;
+  public A(B b) {
+    this.b = b;
+  }
+}
+或者
+public class A {
+  private B b;
+  public A() {
+    this.b = new B();
+  }
+}
+或者
+public class A {
+  public void func(B b) { ... }
+}
+```
+
+4. 将类组装起来并提供执行入口
+
+类定义好了，类之间必要的交互关系也设计好了，接下来我们要将所有的类组装在一起，提供一个执行入口。这个入口可能是一个 main() 函数，也可能是一组给外部用的 API 接口。通过这个入口，我们能触发整个代码跑起来。
+
+接口鉴权并不是一个独立运行的系统，而是一个集成在系统上运行的组件，所以，我们封装所有的实现细节，设计了一个最顶层的 ApiAuthenticator 接口类，暴露一组给外部调用者使用的 API 接口，作为触发执行鉴权逻辑的入口。具体的类的设计如下所示：
+![](_images/1-10.png)
+
+#### 三、如何进行面向对象编程？
+
+接下来，面向对象编程的工作，就是将这些设计思路翻译成代码实现。
+
+对于 AuthToken、ApiRequest、CredentialStorage 这三个类，在这里我就不给出具体的代码实现了。
+```java
+public interface ApiAuthenticator {
+  void auth(String url);
+  void auth(ApiRequest apiRequest);
+}
+
+public class DefaultApiAuthenticatorImpl implements ApiAuthenticator {
+  private CredentialStorage credentialStorage;
+  
+  public DefaultApiAuthenticatorImpl() {
+    this.credentialStorage = new MysqlCredentialStorage();
+  }
+  
+  public DefaultApiAuthenticatorImpl(CredentialStorage credentialStorage) {
+    this.credentialStorage = credentialStorage;
+  }
+
+  @Override
+  public void auth(String url) {
+    ApiRequest apiRequest = ApiRequest.buildFromUrl(url);
+    auth(apiRequest);
+  }
+
+  @Override
+  public void auth(ApiRequest apiRequest) {
+    String appId = apiRequest.getAppId();
+    String token = apiRequest.getToken();
+    long timestamp = apiRequest.getTimestamp();
+    String originalUrl = apiRequest.getOriginalUrl();
+
+    AuthToken clientAuthToken = new AuthToken(token, timestamp);
+    if (clientAuthToken.isExpired()) {
+      throw new RuntimeException("Token is expired.");
+    }
+
+    String password = credentialStorage.getPasswordByAppId(appId);
+    AuthToken serverAuthToken = AuthToken.generate(originalUrl, appId, password, timestamp);
+    if (!serverAuthToken.match(clientAuthToken)) {
+      throw new RuntimeException("Token verfication failed.");
+    }
+  }
+}
+```
+
+#### 辩思
+不过，在平时的工作中，大部分程序员往往都是在脑子里或者草纸上完成面向对象分析和设计，然后就开始写代码了，边写边思考边重构，并不会严格地按照刚刚的流程来执行。而且，说实话，即便我们在写代码之前，花很多时间做分析和设计，绘制出完美的类图、UML 图，也不可能把每个细节、交互都想得很清楚。在落实到代码的时候，我们还是要反复迭代、重构、打破重写。
+
