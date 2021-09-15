@@ -2076,3 +2076,464 @@ public class BeansFactory {
   }
 }
 ```
+
+### 建造者模式
+
+#### 1. 为什么需要使用建造者模式?
+
+如果存在下面情况中的任意一种，我们就要考虑使用建造者模式了。
+
+- 我们把类的必填属性放到构造函数中，强制创建对象的时候就设置。如果必填的属性有很多，把这些必填属性都放到构造函数中设置，那构造函数就又会出现参数列表很长的问题。如果我们把必填属性通过 set() 方法设置，那校验这些必填属性是否已经填写的逻辑就无处安放了。
+- 如果类的属性之间有一定的依赖关系或者约束条件，我们继续使用构造函数配合 set() 方法的设计思路，那这些依赖关系或约束条件的校验逻辑就无处安放了。
+- 如果我们希望创建不可变对象，也就是说，对象在创建好之后，就不能再修改内部的属性值，要实现这个功能，我们就不能在类中暴露 set() 方法。构造函数配合 set() 方法来设置属性值的方式就不适用了。
+
+假设有这样一道设计面试题：我们需要定义一个资源池配置类 ResourcePoolConfig。这里的资源池，你可以简单理解为线程池、连接池、对象池等。在这个资源池配置类中，有以下几个成员变量，也就是可配置项。现在，请你编写代码实现这个 ResourcePoolConfig 类。
+![](_images/2-2.png)
+最常见、最容易想到的实现思路如下代码所示。因为 maxTotal、maxIdle、minIdle 不是必填变量，所以在创建 ResourcePoolConfig 对象的时候，我们通过往构造函数中，给这几个参数传递 null 值，来表示使用默认值。
+```java
+
+public class ResourcePoolConfig {
+  private static final int DEFAULT_MAX_TOTAL = 8;
+  private static final int DEFAULT_MAX_IDLE = 8;
+  private static final int DEFAULT_MIN_IDLE = 0;
+
+  private String name;
+  private int maxTotal = DEFAULT_MAX_TOTAL;
+  private int maxIdle = DEFAULT_MAX_IDLE;
+  private int minIdle = DEFAULT_MIN_IDLE;
+
+  public ResourcePoolConfig(String name, Integer maxTotal, Integer maxIdle, Integer minIdle) {
+    if (StringUtils.isBlank(name)) {
+      throw new IllegalArgumentException("name should not be empty.");
+    }
+    this.name = name;
+
+    if (maxTotal != null) {
+      if (maxTotal <= 0) {
+        throw new IllegalArgumentException("maxTotal should be positive.");
+      }
+      this.maxTotal = maxTotal;
+    }
+
+    if (maxIdle != null) {
+      if (maxIdle < 0) {
+        throw new IllegalArgumentException("maxIdle should not be negative.");
+      }
+      this.maxIdle = maxIdle;
+    }
+
+    if (minIdle != null) {
+      if (minIdle < 0) {
+        throw new IllegalArgumentException("minIdle should not be negative.");
+      }
+      this.minIdle = minIdle;
+    }
+  }
+  //...省略getter方法...
+}
+```
+现在，ResourcePoolConfig 只有 4 个可配置项，对应到构造函数中，也只有 4 个参数，参数的个数不多。但是，如果可配置项逐渐增多，变成了 8 个、10 个，甚至更多，那继续沿用现在的设计思路，构造函数的参数列表会变得很长，代码在可读性和易用性上都会变差。在使用构造函数的时候，我们就容易搞错各参数的顺序，传递进错误的参数值，导致非常隐蔽的 bug。
+```java
+// 参数太多，导致可读性差、参数可能传递错误
+ResourcePoolConfig config = new ResourcePoolConfig("dbconnectionpool", 16, null, 8, null, false , true, 10, 20，false， true);
+```
+解决这个问题的办法你应该也已经想到了，那就是用 set() 函数来给成员变量赋值，以替代冗长的构造函数。我们直接看代码，具体如下所示。其中，配置项 name 是必填的，所以我们把它放到构造函数中设置，强制创建类对象的时候就要填写。<u>其他配置项 maxTotal、maxIdle、minIdle 都不是必填的，所以我们通过 set() 函数来设置，让使用者自主选择填写或者不填写</u>。
+```java
+
+public class ResourcePoolConfig {
+  private static final int DEFAULT_MAX_TOTAL = 8;
+  private static final int DEFAULT_MAX_IDLE = 8;
+  private static final int DEFAULT_MIN_IDLE = 0;
+
+  private String name;
+  private int maxTotal = DEFAULT_MAX_TOTAL;
+  private int maxIdle = DEFAULT_MAX_IDLE;
+  private int minIdle = DEFAULT_MIN_IDLE;
+  
+  public ResourcePoolConfig(String name) {
+    if (StringUtils.isBlank(name)) {
+      throw new IllegalArgumentException("name should not be empty.");
+    }
+    this.name = name;
+  }
+
+  public void setMaxTotal(int maxTotal) {
+    if (maxTotal <= 0) {
+      throw new IllegalArgumentException("maxTotal should be positive.");
+    }
+    this.maxTotal = maxTotal;
+  }
+
+  public void setMaxIdle(int maxIdle) {
+    if (maxIdle < 0) {
+      throw new IllegalArgumentException("maxIdle should not be negative.");
+    }
+    this.maxIdle = maxIdle;
+  }
+
+  public void setMinIdle(int minIdle) {
+    if (minIdle < 0) {
+      throw new IllegalArgumentException("minIdle should not be negative.");
+    }
+    this.minIdle = minIdle;
+  }
+  //...省略getter方法...
+}
+```
+接下来，我们来看新的 ResourcePoolConfig 类该如何使用。我写了一个示例代码，如下所示。没有了冗长的函数调用和参数列表，代码在可读性和易用性上提高了很多。
+```java
+// ResourcePoolConfig使用举例
+ResourcePoolConfig config = new ResourcePoolConfig("dbconnectionpool");
+config.setMaxTotal(16);
+config.setMaxIdle(8);
+```
+至此，我们仍然没有用到建造者模式，通过构造函数设置必填项，通过 set() 方法设置可选配置项，就能实现我们的设计需求。如果我们把问题的难度再加大点，比如，还需要解决下面这三个问题，那现在的设计思路就不能满足了。
+
+- 如果必填的配置项有很多，把这些必填配置项都放到构造函数中设置，那构造函数就又会出现参数列表很长的问题。如果我们把必填项也通过 set() 方法设置，那校验这些必填项是否已经填写的逻辑就无处安放了。
+- 除此之外，假设配置项之间有一定的依赖关系，比如，如果用户设置了 maxTotal、maxIdle、minIdle 其中一个，就必须显式地设置另外两个；或者配置项之间有一定的约束条件，比如，maxIdle 和 minIdle 要小于等于 maxTotal。如果我们继续使用现在的设计思路，那这些配置项之间的依赖关系或者约束条件的校验逻辑就无处安放了。
+- 如果我们希望 ResourcePoolConfig 类对象是不可变对象，也就是说，对象在创建好之后，就不能再修改内部的属性值。要实现这个功能，我们就不能在 ResourcePoolConfig 类中暴露 set() 方法。
+
+<u>我们可以把校验逻辑放置到 Builder 类中，先创建建造者，并且通过 set() 方法设置建造者的变量值，然后在使用 build() 方法真正创建对象之前，做集中的校验，校验通过之后才会创建对象。除此之外，我们把 ResourcePoolConfig 的构造函数改为 private 私有权限。这样我们就只能通过建造者来创建 ResourcePoolConfig 类对象。并且，ResourcePoolConfig 没有提供任何 set() 方法，这样我们创建出来的对象就是不可变对象了。</u>
+
+具体的代码如下所示：
+```java
+
+public class ResourcePoolConfig {
+  private String name;
+  private int maxTotal;
+  private int maxIdle;
+  private int minIdle;
+
+  private ResourcePoolConfig(Builder builder) {
+    this.name = builder.name;
+    this.maxTotal = builder.maxTotal;
+    this.maxIdle = builder.maxIdle;
+    this.minIdle = builder.minIdle;
+  }
+  //...省略getter方法...
+
+  //我们将Builder类设计成了ResourcePoolConfig的内部类。
+  //我们也可以将Builder类设计成独立的非内部类ResourcePoolConfigBuilder。
+  public static class Builder {
+    private static final int DEFAULT_MAX_TOTAL = 8;
+    private static final int DEFAULT_MAX_IDLE = 8;
+    private static final int DEFAULT_MIN_IDLE = 0;
+
+    private String name;
+    private int maxTotal = DEFAULT_MAX_TOTAL;
+    private int maxIdle = DEFAULT_MAX_IDLE;
+    private int minIdle = DEFAULT_MIN_IDLE;
+
+    public ResourcePoolConfig build() {
+      // 校验逻辑放到这里来做，包括必填项校验、依赖关系校验、约束条件校验等
+      if (StringUtils.isBlank(name)) {
+        throw new IllegalArgumentException("...");
+      }
+      if (maxIdle > maxTotal) {
+        throw new IllegalArgumentException("...");
+      }
+      if (minIdle > maxTotal || minIdle > maxIdle) {
+        throw new IllegalArgumentException("...");
+      }
+
+      return new ResourcePoolConfig(this);
+    }
+
+    public Builder setName(String name) {
+      if (StringUtils.isBlank(name)) {
+        throw new IllegalArgumentException("...");
+      }
+      this.name = name;
+      return this;
+    }
+
+    public Builder setMaxTotal(int maxTotal) {
+      if (maxTotal <= 0) {
+        throw new IllegalArgumentException("...");
+      }
+      this.maxTotal = maxTotal;
+      return this;
+    }
+
+    public Builder setMaxIdle(int maxIdle) {
+      if (maxIdle < 0) {
+        throw new IllegalArgumentException("...");
+      }
+      this.maxIdle = maxIdle;
+      return this;
+    }
+
+    public Builder setMinIdle(int minIdle) {
+      if (minIdle < 0) {
+        throw new IllegalArgumentException("...");
+      }
+      this.minIdle = minIdle;
+      return this;
+    }
+  }
+}
+
+// 这段代码会抛出IllegalArgumentException，因为minIdle>maxIdle
+ResourcePoolConfig config = new ResourcePoolConfig.Builder()
+        .setName("dbconnectionpool")
+        .setMaxTotal(16)
+        .setMaxIdle(10)
+        .setMinIdle(12)
+        .build();
+```
+实际上，使用建造者模式创建对象，还能避免对象存在无效状态。
+
+如果我们并不是很关心对象是否有短暂的无效状态，也不是太在意对象是否是可变的。比如，对象只是用来映射数据库读出来的数据，那我们直接暴露 set() 方法来设置类的成员变量值是完全没问题的。而且，<u>使用建造者模式来构建对象，代码实际上是有点重复的，ResourcePoolConfig 类中的成员变量，要在 Builder 类中重新再定义一遍。</u>
+
+#### 2. 与工厂模式有何区别？
+
+- 工厂模式是用来创建不同但是相关类型的对象（继承同一父类或者接口的一组子类），由给定的参数来决定创建哪种类型的对象。
+- 建造者模式是用来创建一种类型的复杂对象，通过设置不同的可选参数，“定制化”地创建不同的对象。
+
+网上有一个经典的例子很好地解释了两者的区别:
+
+顾客走进一家餐馆点餐，我们利用工厂模式，根据用户不同的选择，来制作不同的食物，比如披萨、汉堡、沙拉。对于披萨来说，用户又有各种配料可以定制，比如奶酪、西红柿、起司，我们通过建造者模式根据用户选择的不同配料来制作披萨。
+
+实际上，我们也不要太学院派，非得把工厂模式、建造者模式分得那么清楚，我们需要知道的是，每个模式为什么这么设计，能解决什么问题。只有了解了这些最本质的东西，我们才能不生搬硬套，才能灵活应用，甚至可以混用各种模式创造出新的模式，来解决特定场景的问题。
+
+### 原型模式
+
+对于熟悉 JavaScript 语言的前端程序员来说，原型模式是一种比较常用的开发模式。这是因为，有别于 Java、C++ 等基于类的面向对象编程语言，JavaScript 是一种基于原型的面向对象编程语言。即便 JavaScript 现在也引入了类的概念，但它也只是基于原型的语法糖而已。不过，如果你熟悉的是 Java、C++ 等这些编程语言，那在实际的开发中，就很少用到原型模式了。
+
+#### 1. 原型模式的原理与应用
+
+> 如果对象的创建成本比较大，而同一个类的不同对象之间差别不大（大部分字段都相同），在这种情况下，我们可以利用对已有对象（原型）进行复制（或者叫拷贝）的方式来创建新对象，以达到节省创建时间的目的。这种基于原型来创建对象的方式就叫作原型设计模式（Prototype Design Pattern），简称原型模式。
+
+##### 那何为“对象的创建成本比较大”？
+
+实际上，创建对象包含的申请内存、给成员变量赋值这一过程，本身并不会花费太多时间，或者说对于大部分业务系统来说，这点时间完全是可以忽略的。应用一个复杂的模式，只得到一点点的性能提升，这就是所谓的过度设计，得不偿失。
+
+<u>但是，如果对象中的数据需要经过复杂的计算才能得到（比如排序、计算哈希值），或者需要从 RPC、网络、数据库、文件系统等非常慢速的 IO 中读取，这种情况下，我们就可以利用原型模式，从其他已有对象中直接拷贝得到，而不用每次在创建新对象的时候，都重复执行这些耗时的操作。</u>
+
+接下来，我们通过一个例子来解释一下刚刚这段话:
+
+假设数据库中存储了大约 10 万条“搜索关键词”信息，每条信息包含关键词、关键词被搜索的次数、信息最近被更新的时间等。系统 A 在启动的时候会加载这份数据到内存中，用于处理某些其他的业务需求。为了方便快速地查找某个关键词对应的信息，我们给关键词建立一个散列表索引。
+
+如果你熟悉的是 Java 语言，可以直接使用语言中提供的 HashMap 容器来实现。其中，HashMap 的 key 为搜索关键词，value 为关键词详细信息（比如搜索次数）。我们只需要将数据从数据库中读取出来，放入 HashMap 就可以了。
+
+不过，我们还有另外一个系统 B，专门用来分析搜索日志，定期（比如间隔 10 分钟）批量地更新数据库中的数据，并且标记为新的数据版本。比如，在下面的示例图中，我们对 v2 版本的数据进行更新，得到 v3 版本的数据。这里我们假设只有更新和新添关键词，没有删除关键词的行为。
+![](_images/2-3.png)
+为了保证系统 A 中数据的实时性（不一定非常实时，但数据也不能太旧），系统 A 需要定期根据数据库中的数据，更新内存中的索引和数据。
+
+我们该如何实现这个需求呢？
+
+实际上，也不难。我们只需要在系统 A 中，记录当前数据的版本 Va 对应的更新时间 Ta，从数据库中捞出更新时间大于 Ta 的所有搜索关键词，也就是找出 Va 版本与最新版本数据的“差集”，然后针对差集中的每个关键词进行处理。如果它已经在散列表中存在了，我们就更新相应的搜索次数、更新时间等信息；如果它在散列表中不存在，我们就将它插入到散列表中:
+```java
+
+public class Demo {
+  private ConcurrentHashMap<String, SearchWord> currentKeywords = new ConcurrentHashMap<>();
+  private long lastUpdateTime = -1;
+
+  public void refresh() {
+    // 从数据库中取出更新时间>lastUpdateTime的数据，放入到currentKeywords中
+    List<SearchWord> toBeUpdatedSearchWords = getSearchWords(lastUpdateTime);
+    long maxNewUpdatedTime = lastUpdateTime;
+    for (SearchWord searchWord : toBeUpdatedSearchWords) {
+      if (searchWord.getLastUpdateTime() > maxNewUpdatedTime) {
+        maxNewUpdatedTime = searchWord.getLastUpdateTime();
+      }
+      if (currentKeywords.containsKey(searchWord.getKeyword())) {
+        currentKeywords.replace(searchWord.getKeyword(), searchWord);
+      } else {
+        currentKeywords.put(searchWord.getKeyword(), searchWord);
+      }
+    }
+
+    lastUpdateTime = maxNewUpdatedTime;
+  }
+
+  private List<SearchWord> getSearchWords(long lastUpdateTime) {
+    // TODO: 从数据库中取出更新时间>lastUpdateTime的数据
+    return null;
+  }
+}
+```
+不过，现在，我们有一个特殊的要求：任何时刻，系统 A 中的所有数据都必须是同一个版本的，要么都是版本 a，要么都是版本 b，不能有的是版本 a，有的是版本 b。那刚刚的更新方式就不能满足这个要求了。除此之外，我们还要求：在更新内存数据的时候，系统 A 不能处于不可用状态，也就是不能停机更新数据。
+
+实际上，也不难。我们把正在使用的数据的版本定义为“服务版本”，当我们要更新内存中的数据的时候，我们并不是直接在服务版本（假设是版本 a 数据）上更新，而是重新创建另一个版本数据（假设是版本 b 数据），等新的版本数据建好之后，再一次性地将服务版本从版本 a 切换到版本 b。这样既保证了数据一直可用，又避免了中间状态的存在:
+```java
+
+public class Demo {
+  private HashMap<String, SearchWord> currentKeywords=new HashMap<>();
+
+  public void refresh() {
+    HashMap<String, SearchWord> newKeywords = new LinkedHashMap<>();
+
+    // 从数据库中取出所有的数据，放入到newKeywords中
+    List<SearchWord> toBeUpdatedSearchWords = getSearchWords();
+    for (SearchWord searchWord : toBeUpdatedSearchWords) {
+      newKeywords.put(searchWord.getKeyword(), searchWord);
+    }
+
+    currentKeywords = newKeywords;
+  }
+
+  private List<SearchWord> getSearchWords() {
+    // TODO: 从数据库中取出所有的数据
+    return null;
+  }
+}
+```
+不过，在上面的代码实现中，newKeywords 构建的成本比较高。我们需要将这 10 万条数据从数据库中读出，然后计算哈希值，构建 newKeywords。这个过程显然是比较耗时。为了提高效率，原型模式就派上用场了。
+
+我们拷贝 currentKeywords 数据到 newKeywords 中，然后从数据库中只捞出新增或者有更新的关键词，更新到 newKeywords 中。而相对于 10 万条数据来说，每次新增或者更新的关键词个数是比较少的，所以，这种策略大大提高了数据更新的效率:
+```java
+public class Demo {
+  private HashMap<String, SearchWord> currentKeywords=new HashMap<>();
+  private long lastUpdateTime = -1;
+
+  public void refresh() {
+    // 原型模式就这么简单，拷贝已有对象的数据，更新少量差值
+    HashMap<String, SearchWord> newKeywords = (HashMap<String, SearchWord>) currentKeywords.clone(); // clone
+
+    // 从数据库中取出更新时间>lastUpdateTime的数据，放入到newKeywords中
+    List<SearchWord> toBeUpdatedSearchWords = getSearchWords(lastUpdateTime);
+    long maxNewUpdatedTime = lastUpdateTime;
+    for (SearchWord searchWord : toBeUpdatedSearchWords) {
+      if (searchWord.getLastUpdateTime() > maxNewUpdatedTime) {
+        maxNewUpdatedTime = searchWord.getLastUpdateTime();
+      }
+      if (newKeywords.containsKey(searchWord.getKeyword())) {
+        SearchWord oldSearchWord = newKeywords.get(searchWord.getKeyword());
+        oldSearchWord.setCount(searchWord.getCount());
+        oldSearchWord.setLastUpdateTime(searchWord.getLastUpdateTime());
+      } else {
+        newKeywords.put(searchWord.getKeyword(), searchWord);
+      }
+    }
+
+    lastUpdateTime = maxNewUpdatedTime;
+    currentKeywords = newKeywords;
+  }
+
+  private List<SearchWord> getSearchWords(long lastUpdateTime) {
+    // TODO: 从数据库中取出更新时间>lastUpdateTime的数据
+    return null;
+  }
+}
+```
+这里我们利用了 Java 中的 clone() 语法来复制一个对象。如果你熟悉的语言没有这个语法，那把数据从 currentKeywords 中一个个取出来，然后再重新计算哈希值，放入到 newKeywords 中也是可以接受的。毕竟，最耗时的还是从数据库中取数据的操作。相对于数据库的 IO 操作来说，内存操作和 CPU 计算的耗时都是可以忽略的。
+
+不过，不知道你有没有发现，实际上，刚刚的代码实现是有问题的。要弄明白到底有什么问题，我们需要先了解另外两个概念：深拷贝（Deep Copy）和浅拷贝（Shallow Copy）
+
+#### 2. 原型模式的实现方式：深拷贝和浅拷贝
+
+我们来看，在内存中，用散列表组织的搜索关键词信息是如何存储的。散列表索引中，每个结点存储的 key 是搜索关键词，value 是 SearchWord 对象的内存地址。SearchWord 对象本身存储在散列表之外的内存空间中。
+![](_images/2-4.png)
+<u>浅拷贝和深拷贝的区别在于，浅拷贝只会复制图中的索引（散列表），不会复制数据（SearchWord 对象）本身。相反，深拷贝不仅仅会复制索引，还会复制数据本身。</u>
+
+浅拷贝得到的对象（newKeywords）跟原始对象（currentKeywords）共享数据（SearchWord 对象），而深拷贝得到的是一份完完全全独立的对象。具体的对比如下图所示：
+![](_images/2-5.png)
+在 Java 语言中，Object 类的 clone() 方法执行的就是我们刚刚说的浅拷贝。它只会拷贝对象中的基本数据类型的数据（比如，int、long），以及引用对象（SearchWord）的内存地址，不会递归地拷贝引用对象本身。
+
+在上面的代码中，我们通过调用 HashMap 上的 clone() 浅拷贝方法来实现原型模式。当我们通过 newKeywords 更新 SearchWord 对象的时候（比如，更新“设计模式”这个搜索关键词的访问次数），newKeywords 和 currentKeywords 因为指向相同的一组 SearchWord 对象，就会导致 currentKeywords 中指向的 SearchWord，有的是老版本的，有的是新版本的，就没法满足我们之前的需求：currentKeywords 中的数据在任何时刻都是同一个版本的，不存在介于老版本与新版本之间的中间状态。
+
+现在，我们又该如何来解决这个问题呢？
+
+我们可以将浅拷贝替换为深拷贝。newKeywords 不仅仅复制 currentKeywords 的索引，还把 SearchWord 对象也复制一份出来，这样 newKeywords 和 currentKeywords 就指向不同的 SearchWord 对象，也就不存在更新 newKeywords 的数据会导致 currentKeywords 的数据也被更新的问题了。
+
+那如何实现深拷贝呢？总结一下的话，有下面两种方法。
+
+第一种方法：递归拷贝对象、对象的引用对象以及引用对象的引用对象……直到要拷贝的对象只包含基本数据类型数据，没有引用对象为止。根据这个思路对之前的代码进行重构。重构之后的代码如下所示：
+```java
+
+public class Demo {
+  private HashMap<String, SearchWord> currentKeywords=new HashMap<>();
+  private long lastUpdateTime = -1;
+
+  public void refresh() {
+    // Deep copy
+    HashMap<String, SearchWord> newKeywords = new HashMap<>();
+    for (HashMap.Entry<String, SearchWord> e : currentKeywords.entrySet()) {
+      SearchWord searchWord = e.getValue();
+      SearchWord newSearchWord = new SearchWord(
+              searchWord.getKeyword(), searchWord.getCount(), searchWord.getLastUpdateTime());
+      newKeywords.put(e.getKey(), newSearchWord);
+    }
+
+    // 从数据库中取出更新时间>lastUpdateTime的数据，放入到newKeywords中
+    List<SearchWord> toBeUpdatedSearchWords = getSearchWords(lastUpdateTime);
+    long maxNewUpdatedTime = lastUpdateTime;
+    for (SearchWord searchWord : toBeUpdatedSearchWords) {
+      if (searchWord.getLastUpdateTime() > maxNewUpdatedTime) {
+        maxNewUpdatedTime = searchWord.getLastUpdateTime();
+      }
+      if (newKeywords.containsKey(searchWord.getKeyword())) {
+        SearchWord oldSearchWord = newKeywords.get(searchWord.getKeyword());
+        oldSearchWord.setCount(searchWord.getCount());
+        oldSearchWord.setLastUpdateTime(searchWord.getLastUpdateTime());
+      } else {
+        newKeywords.put(searchWord.getKeyword(), searchWord);
+      }
+    }
+
+    lastUpdateTime = maxNewUpdatedTime;
+    currentKeywords = newKeywords;
+  }
+
+  private List<SearchWord> getSearchWords(long lastUpdateTime) {
+    // TODO: 从数据库中取出更新时间>lastUpdateTime的数据
+    return null;
+  }
+
+}
+```
+第二种方法：先将对象序列化，然后再反序列化成新的对象。具体的示例代码如下所示：
+```java
+
+public Object deepCopy(Object object) {
+  ByteArrayOutputStream bo = new ByteArrayOutputStream();
+  ObjectOutputStream oo = new ObjectOutputStream(bo);
+  oo.writeObject(object);
+  
+  ByteArrayInputStream bi = new ByteArrayInputStream(bo.toByteArray());
+  ObjectInputStream oi = new ObjectInputStream(bi);
+  
+  return oi.readObject();
+}
+```
+刚刚的两种实现方法，不管采用哪种，深拷贝都要比浅拷贝耗时、耗内存空间。针对我们这个应用场景，有没有更快、更省内存的实现方式呢？
+
+<u>我们可以先采用浅拷贝的方式创建 newKeywords。对于需要更新的 SearchWord 对象，我们再使用深度拷贝的方式创建一份新的对象，替换 newKeywords 中的老对象。</u>毕竟需要更新的数据是很少的。这种方式即利用了浅拷贝节省时间、空间的优点，又能保证 currentKeywords 中的中数据都是老版本的数据。具体的代码实现如下所示。<u>这也是标题中讲到的，在我们这个应用场景下，最快速 clone 散列表的方式。</u>
+```java
+
+public class Demo {
+  private HashMap<String, SearchWord> currentKeywords=new HashMap<>();
+  private long lastUpdateTime = -1;
+
+  public void refresh() {
+    // Shallow copy
+    HashMap<String, SearchWord> newKeywords = (HashMap<String, SearchWord>) currentKeywords.clone();
+
+    // 从数据库中取出更新时间>lastUpdateTime的数据，放入到newKeywords中
+    List<SearchWord> toBeUpdatedSearchWords = getSearchWords(lastUpdateTime);
+    long maxNewUpdatedTime = lastUpdateTime;
+    for (SearchWord searchWord : toBeUpdatedSearchWords) {
+      if (searchWord.getLastUpdateTime() > maxNewUpdatedTime) {
+        maxNewUpdatedTime = searchWord.getLastUpdateTime();
+      }
+      if (newKeywords.containsKey(searchWord.getKeyword())) {
+        newKeywords.remove(searchWord.getKeyword());
+      }
+      newKeywords.put(searchWord.getKeyword(), searchWord);
+    }
+
+    lastUpdateTime = maxNewUpdatedTime;
+    currentKeywords = newKeywords;
+  }
+
+  private List<SearchWord> getSearchWords(long lastUpdateTime) {
+    // TODO: 从数据库中取出更新时间>lastUpdateTime的数据
+    return null;
+  }
+}
+```
+
+## 设计模式与范式：结构型
+
+
