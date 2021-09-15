@@ -1847,3 +1847,232 @@ public class RedisCounter {
 
 **对象创建**
 
+在 DI 容器中，如果我们给每个类都对应创建一个工厂类，那项目中类的个数会成倍增加，这会增加代码的维护成本。要解决这个问题并不难。我们只需要将所有类对象的创建都放到一个工厂类中完成就可以了，比如 BeansFactory。
+
+如果要创建的类对象非常多，BeansFactory 中的代码会不会线性膨胀（代码量跟创建对象的个数成正比）呢？实际上并不会。待会讲到 DI 容器的具体实现的时候，我们会讲“反射”这种机制，它能在程序运行的过程中，动态地加载类、创建对象，不需要事先在代码中写死要创建哪些对象。所以，不管是创建一个对象还是十个对象，BeansFactory 工厂类代码都是一样的。
+
+**生命周期**
+
+简单工厂模式有两种实现方式，一种是每次都返回新创建的对象，另一种是每次都返回同一个事先创建好的对象，也就是所谓的单例对象。在 Spring 框架中，我们可以通过配置 scope 属性，来区分这两种不同类型的对象。scope=prototype 表示返回新创建的对象，scope=singleton 表示返回单例对象。
+
+除此之外，我们还可以配置对象是否支持懒加载。如果 lazy-init=true，对象在真正被使用到的时候（比如：BeansFactory.getBean(“userService”)）才被被创建；如果 lazy-init=false，对象在应用启动的时候就事先创建好。
+
+不仅如此，我们还可以配置对象的 init-method 和 destroy-method 方法，比如 init-method=loadProperties()，destroy-method=updateConfigFile()。DI 容器在创建好对象之后，会主动调用 init-method 属性指定的方法来初始化对象。在对象被最终销毁之前，DI 容器会主动调用 destroy-method 属性指定的方法来做一些清理工作，比如释放数据库连接池、关闭文件。
+
+#### 如何实现一个简单的 DI 容器？
+
+<u>核心逻辑只需要包括这样两个部分：配置文件解析、根据配置文件通过“反射”语法来创建对象。</u>
+
+**1. 最小原型设计**
+
+我们只实现一个 DI 容器的最小原型。像 Spring 框架这样的 DI 容器，它支持的配置格式非常灵活和复杂。在最小原型中，我们只支持下面配置文件中涉及的配置语法.
+```java
+
+配置文件beans.xml
+<beans>
+   <bean id="rateLimiter" class="com.xzg.RateLimiter">
+      <constructor-arg ref="redisCounter"/>
+   </bean>
+ 
+   <bean id="redisCounter" class="com.xzg.redisCounter" scope="singleton" lazy-init="true">
+     <constructor-arg type="String" value="127.0.0.1">
+     <constructor-arg type="int" value=1234>
+   </bean>
+</bean
+```
+最小原型的使用方式跟 Spring 框架非常类似，示例代码如下所示：
+```java
+
+public class Demo {
+  public static void main(String[] args) {
+    ApplicationContext applicationContext = new ClassPathXmlApplicationContext(
+            "beans.xml");
+    RateLimiter rateLimiter = (RateLimiter) applicationContext.getBean("rateLimiter");
+    rateLimiter.test();
+    //...
+  }
+}
+```
+
+**2. 提供执行入口**
+
+执行入口就是一组暴露给外部使用的接口和类。过刚刚的最小原型使用示例代码，我们可以看出，执行入口主要包含两部分：ApplicationContext 和 ClassPathXmlApplicationContext。其中，ApplicationContext 是接口，ClassPathXmlApplicationContext 是接口的实现类。两个类具体实现如下所示：
+
+```java
+
+public interface ApplicationContext {
+  Object getBean(String beanId);
+}
+
+public class ClassPathXmlApplicationContext implements ApplicationContext {
+  private BeansFactory beansFactory;
+  private BeanConfigParser beanConfigParser;
+
+  public ClassPathXmlApplicationContext(String configLocation) {
+    this.beansFactory = new BeansFactory();
+    this.beanConfigParser = new XmlBeanConfigParser();
+    loadBeanDefinitions(configLocation);
+  }
+
+  private void loadBeanDefinitions(String configLocation) {
+    InputStream in = null;
+    try {
+      in = this.getClass().getResourceAsStream("/" + configLocation);
+      if (in == null) {
+        throw new RuntimeException("Can not find config file: " + configLocation);
+      }
+      List<BeanDefinition> beanDefinitions = beanConfigParser.parse(in);
+      beansFactory.addBeanDefinitions(beanDefinitions);
+    } finally {
+      if (in != null) {
+        try {
+          in.close();
+        } catch (IOException e) {
+          // TODO: log error
+        }
+      }
+    }
+  }
+
+  @Override
+  public Object getBean(String beanId) {
+    return beansFactory.getBean(beanId);
+  }
+}
+```
+从上面的代码中，我们可以看出，ClassPathXmlApplicationContext 负责组装 BeansFactory 和 BeanConfigParser 两个类，串联执行流程：从 classpath 中加载 XML 格式的配置文件，通过 BeanConfigParser 解析为统一的 BeanDefinition 格式，然后，BeansFactory 根据 BeanDefinition 来创建对象
+
+**3. 配置文件解析**
+
+配置文件解析主要包含 BeanConfigParser 接口和 XmlBeanConfigParser 实现类，负责将配置文件解析为 BeanDefinition 结构，以便 BeansFactory 根据这个结构来创建对象。这里我只给出两个类的大致设计思路，并未给出具体的实现代码。
+```java
+
+public interface BeanConfigParser {
+  List<BeanDefinition> parse(InputStream inputStream);
+  List<BeanDefinition> parse(String configContent);
+}
+
+public class XmlBeanConfigParser implements BeanConfigParser {
+
+  @Override
+  public List<BeanDefinition> parse(InputStream inputStream) {
+    String content = null;
+    // TODO:...
+    return parse(content);
+  }
+
+  @Override
+  public List<BeanDefinition> parse(String configContent) {
+    List<BeanDefinition> beanDefinitions = new ArrayList<>();
+    // TODO:...
+    return beanDefinitions;
+  }
+
+}
+
+public class BeanDefinition {
+  private String id;
+  private String className;
+  private List<ConstructorArg> constructorArgs = new ArrayList<>();
+  private Scope scope = Scope.SINGLETON;
+  private boolean lazyInit = false;
+  // 省略必要的getter/setter/constructors
+ 
+  public boolean isSingleton() {
+    return scope.equals(Scope.SINGLETON);
+  }
+
+
+  public static enum Scope {
+    SINGLETON,
+    PROTOTYPE
+  }
+  
+  public static class ConstructorArg {
+    private boolean isRef;
+    private Class type;
+    private Object arg;
+    // 省略必要的getter/setter/constructors
+  }
+}
+```
+
+**4. 核心工厂类设计**
+
+这是我们这个 DI 容器最核心的一个类了。它负责根据从配置文件解析得到的 BeanDefinition 来创建对象。
+
+如果对象的 scope 属性是 singleton，那对象创建之后会缓存在 singletonObjects 这样一个 map 中，下次再请求此对象的时候，直接从 map 中取出返回，不需要重新创建。如果对象的 scope 属性是 prototype，那每次请求对象，BeansFactory 都会创建一个新的对象返回。
+
+BeansFactory 创建对象用到的主要技术点就是 Java 中的反射语法：一种动态加载类和创建对象的机制。
+
+具体代码实现如下所示：
+```java
+
+public class BeansFactory {
+  private ConcurrentHashMap<String, Object> singletonObjects = new ConcurrentHashMap<>();
+  private ConcurrentHashMap<String, BeanDefinition> beanDefinitions = new ConcurrentHashMap<>();
+
+  public void addBeanDefinitions(List<BeanDefinition> beanDefinitionList) {
+    for (BeanDefinition beanDefinition : beanDefinitionList) {
+      this.beanDefinitions.putIfAbsent(beanDefinition.getId(), beanDefinition);
+    }
+
+    for (BeanDefinition beanDefinition : beanDefinitionList) {
+      if (beanDefinition.isLazyInit() == false && beanDefinition.isSingleton()) {
+        createBean(beanDefinition);
+      }
+    }
+  }
+
+  public Object getBean(String beanId) {
+    BeanDefinition beanDefinition = beanDefinitions.get(beanId);
+    if (beanDefinition == null) {
+      throw new NoSuchBeanDefinitionException("Bean is not defined: " + beanId);
+    }
+    return createBean(beanDefinition);
+  }
+
+  @VisibleForTesting
+  protected Object createBean(BeanDefinition beanDefinition) {
+    if (beanDefinition.isSingleton() && singletonObjects.contains(beanDefinition.getId())) {
+      return singletonObjects.get(beanDefinition.getId());
+    }
+
+    Object bean = null;
+    try {
+      Class beanClass = Class.forName(beanDefinition.getClassName());
+      List<BeanDefinition.ConstructorArg> args = beanDefinition.getConstructorArgs();
+      if (args.isEmpty()) {
+        bean = beanClass.newInstance();
+      } else {
+        Class[] argClasses = new Class[args.size()];
+        Object[] argObjects = new Object[args.size()];
+        for (int i = 0; i < args.size(); ++i) {
+          BeanDefinition.ConstructorArg arg = args.get(i);
+          if (!arg.getIsRef()) {
+            argClasses[i] = arg.getType();
+            argObjects[i] = arg.getArg();
+          } else {
+            BeanDefinition refBeanDefinition = beanDefinitions.get(arg.getArg());
+            if (refBeanDefinition == null) {
+              throw new NoSuchBeanDefinitionException("Bean is not defined: " + arg.getArg());
+            }
+            argClasses[i] = Class.forName(refBeanDefinition.getClassName());
+            argObjects[i] = createBean(refBeanDefinition);
+          }
+        }
+        bean = beanClass.getConstructor(argClasses).newInstance(argObjects);
+      }
+    } catch (ClassNotFoundException | IllegalAccessException
+            | InstantiationException | NoSuchMethodException | InvocationTargetException e) {
+      throw new BeanCreationFailureException("", e);
+    }
+
+    if (bean != null && beanDefinition.isSingleton()) {
+      singletonObjects.putIfAbsent(beanDefinition.getId(), bean);
+      return singletonObjects.get(beanDefinition.getId());
+    }
+    return bean;
+  }
+}
+```
