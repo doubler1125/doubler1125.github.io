@@ -3389,3 +3389,240 @@ List<String> stooges = Arrays.asList("Larry", "Moe", "Curly");
 
 <u>要支持两个接口调用在一个事务中执行，是比较难实现的，这涉及分布式事务问题。虽然我们可以通过引入分布式事务框架或者事后补偿的机制来解决，但代码实现都比较复杂。而最简单的解决方案是，利用数据库事务或者 Spring 框架提供的事务（如果是 Java 语言的话），在一个事务中，执行创建用户和创建钱包这两个 SQL 操作。这就要求两个 SQL 操作要在一个接口中完成，所以，我们可以借鉴门面模式的思想，再设计一个包裹这两个操作的新接口，让新接口在一个事务中执行两个 SQL 操作。</u>
 
+### 组合模式
+
+还剩下两个不那么常用的：组合模式和享元模式。
+
+<u>组合模式跟我们之前讲的面向对象设计中的“组合关系（通过组合来组装两个类）”，完全是两码事。这里讲的“组合模式”，主要是用来处理树形结构数据。这里的“数据”，你可以简单理解为一组对象集合.</u>
+
+<u>正因为其应用场景的特殊性，数据必须能表示成树形结构，这也导致了这种模式在实际的项目开发中并不那么常用。但是，一旦数据满足树形结构，应用这种模式就能发挥很大的作用，能让代码变得非常简洁。</u>
+
+#### 1.组合模式的原理与实现
+
+> 将一组对象组织（Compose）成树形结构，以表示一种“部分 - 整体”的层次结构。组合让客户端（在很多设计模式书籍中，“客户端”代指代码的使用者。）可以统一单个对象和组合对象的处理逻辑。
+
+组合模式的设计思路，与其说是一种设计模式，倒不如说是对业务场景的一种数据结构和算法的抽象。其中，数据可以表示成树这种数据结构，业务需求可以通过在树上的递归遍历算法来实现。
+
+#### 2.组合模式的应用场景举例
+
+在实际的项目中，遇到类似的可以表示成树形结构的业务场景，你只要“照葫芦画瓢”去设计就可以了。
+
+假设我们在开发一个 OA 系统（办公自动化系统）。公司的组织结构包含部门和员工两种数据类型。其中，部门又可以包含子部门和员工。在数据库中的表结构如下所示：
+![](_images/2-7.png)
+我们希望在内存中构建整个公司的人员架构图（部门、子部门、员工的隶属关系），并且提供接口计算出部门的薪资成本（隶属于这个部门的所有员工的薪资和）。
+
+部门包含子部门和员工，这是一种嵌套结构，可以表示成树这种数据结构。计算每个部门的薪资开支这样一个需求，也可以通过在树上的遍历算法来实现。所以，从这个角度来看，这个应用场景可以使用组合模式来设计和实现。
+
+其中，HumanResource 是部门类（Department）和员工类（Employee）抽象出来的父类，为的是能统一薪资的处理逻辑。Demo 中的代码负责从数据库中读取数据并在内存中构建组织架构图。
+```java
+
+public abstract class HumanResource {
+  protected long id;
+  protected double salary;
+
+  public HumanResource(long id) {
+    this.id = id;
+  }
+
+  public long getId() {
+    return id;
+  }
+
+  public abstract double calculateSalary();
+}
+
+public class Employee extends HumanResource {
+  public Employee(long id, double salary) {
+    super(id);
+    this.salary = salary;
+  }
+
+  @Override
+  public double calculateSalary() {
+    return salary;
+  }
+}
+
+public class Department extends HumanResource {
+  private List<HumanResource> subNodes = new ArrayList<>();
+
+  public Department(long id) {
+    super(id);
+  }
+
+  @Override
+  public double calculateSalary() {
+    double totalSalary = 0;
+    for (HumanResource hr : subNodes) {
+      totalSalary += hr.calculateSalary();
+    }
+    this.salary = totalSalary;
+    return totalSalary;
+  }
+
+  public void addSubNode(HumanResource hr) {
+    subNodes.add(hr);
+  }
+}
+
+// 构建组织架构的代码
+public class Demo {
+  private static final long ORGANIZATION_ROOT_ID = 1001;
+  private DepartmentRepo departmentRepo; // 依赖注入
+  private EmployeeRepo employeeRepo; // 依赖注入
+
+  public void buildOrganization() {
+    Department rootDepartment = new Department(ORGANIZATION_ROOT_ID);
+    buildOrganization(rootDepartment);
+  }
+
+  private void buildOrganization(Department department) {
+    List<Long> subDepartmentIds = departmentRepo.getSubDepartmentIds(department.getId());
+    for (Long subDepartmentId : subDepartmentIds) {
+      Department subDepartment = new Department(subDepartmentId);
+      department.addSubNode(subDepartment);
+      buildOrganization(subDepartment);
+    }
+    List<Long> employeeIds = employeeRepo.getDepartmentEmployeeIds(department.getId());
+    for (Long employeeId : employeeIds) {
+      double salary = employeeRepo.getEmployeeSalary(employeeId);
+      department.addSubNode(new Employee(employeeId, salary));
+    }
+  }
+}
+```
+我们再拿组合模式的定义跟这个例子对照一下：“将一组对象（员工和部门）组织成树形结构，以表示一种‘部分 - 整体’的层次结构（部门与子部门的嵌套结构）。组合模式让客户端可以统一单个对象（员工）和组合对象（部门）的处理逻辑（递归遍历）。
+
+### 享元模式
+
+我们再来学习一个不那么常用的模式
+#### 1.享元模式原理与实现
+
+> 所谓“享元”，顾名思义就是被共享的单元。享元模式的意图是复用对象，节省内存，前提是享元对象是不可变对象。
+
+<u>具体来讲，当一个系统中存在大量重复对象的时候，如果这些重复的对象是不可变对象，我们就可以利用享元模式将对象设计成享元，在内存中只保留一份实例，供多处代码引用。这样可以减少内存中对象的数量，起到节省内存的目的。</u>实际上，不仅仅相同对象可以设计成享元，对于相似对象，我们也可以将这些对象中相同的部分（字段）提取出来，设计成享元，让这些大量相似对象引用这些享元。
+
+下来，我们通过一个简单的例子解释一下享元模式。
+
+假设我们在开发一个棋牌游戏（比如象棋）。一个游戏厅中有成千上万个“房间”，每个房间对应一个棋局。棋局要保存每个棋子的数据，比如：棋子类型（将、相、士、炮等）、棋子颜色（红方、黑方）、棋子在棋局中的位置。利用这些数据，我们就能显示一个完整的棋盘给玩家。具体的代码如下所示。其中，ChessPiece 类表示棋子，ChessBoard 类表示一个棋局，里面保存了象棋中 30 个棋子的信息。
+```java
+
+public class ChessPiece {//棋子
+  private int id;
+  private String text;
+  private Color color;
+  private int positionX;
+  private int positionY;
+
+  public ChessPiece(int id, String text, Color color, int positionX, int positionY) {
+    this.id = id;
+    this.text = text;
+    this.color = color;
+    this.positionX = positionX;
+    this.positionY = positionX;
+  }
+
+  public static enum Color {
+    RED, BLACK
+  }
+
+  // ...省略其他属性和getter/setter方法...
+}
+
+public class ChessBoard {//棋局
+  private Map<Integer, ChessPiece> chessPieces = new HashMap<>();
+
+  public ChessBoard() {
+    init();
+  }
+
+  private void init() {
+    chessPieces.put(1, new ChessPiece(1, "車", ChessPiece.Color.BLACK, 0, 0));
+    chessPieces.put(2, new ChessPiece(2,"馬", ChessPiece.Color.BLACK, 0, 1));
+    //...省略摆放其他棋子的代码...
+  }
+
+  public void move(int chessPieceId, int toPositionX, int toPositionY) {
+    //...省略...
+  }
+}
+```
+为了记录每个房间当前的棋局情况，我们需要给每个房间都创建一个 ChessBoard 棋局对象。因为游戏大厅中有成千上万的房间（实际上，百万人同时在线的游戏大厅也有很多），那保存这么多棋局对象就会消耗大量的内存。有没有什么办法来节省内存呢？
+
+这个时候，享元模式就可以派上用场了。像刚刚的实现方式，在内存中会有大量的相似对象。这些相似对象的 id、text、color 都是相同的，唯独 positionX、positionY 不同。实际上，我们可以将棋子的 id、text、color 属性拆分出来，设计成独立的类，并且作为享元供多个棋盘复用。这样，棋盘只需要记录每个棋子的位置信息就可以了。具体的代码实现如下所示：
+```java
+
+// 享元类
+public class ChessPieceUnit {
+  private int id;
+  private String text;
+  private Color color;
+
+  public ChessPieceUnit(int id, String text, Color color) {
+    this.id = id;
+    this.text = text;
+    this.color = color;
+  }
+
+  public static enum Color {
+    RED, BLACK
+  }
+
+  // ...省略其他属性和getter方法...
+}
+
+public class ChessPieceUnitFactory {
+  private static final Map<Integer, ChessPieceUnit> pieces = new HashMap<>();
+
+  static {
+    pieces.put(1, new ChessPieceUnit(1, "車", ChessPieceUnit.Color.BLACK));
+    pieces.put(2, new ChessPieceUnit(2,"馬", ChessPieceUnit.Color.BLACK));
+    //...省略摆放其他棋子的代码...
+  }
+
+  public static ChessPieceUnit getChessPiece(int chessPieceId) {
+    return pieces.get(chessPieceId);
+  }
+}
+
+public class ChessPiece {
+  private ChessPieceUnit chessPieceUnit;
+  private int positionX;
+  private int positionY;
+
+  public ChessPiece(ChessPieceUnit unit, int positionX, int positionY) {
+    this.chessPieceUnit = unit;
+    this.positionX = positionX;
+    this.positionY = positionY;
+  }
+  // 省略getter、setter方法
+}
+
+public class ChessBoard {
+  private Map<Integer, ChessPiece> chessPieces = new HashMap<>();
+
+  public ChessBoard() {
+    init();
+  }
+
+  private void init() {
+    chessPieces.put(1, new ChessPiece(
+            ChessPieceUnitFactory.getChessPiece(1), 0,0));
+    chessPieces.put(2, new ChessPiece(
+            ChessPieceUnitFactory.getChessPiece(2), 1,0));
+    //...省略摆放其他棋子的代码...
+  }
+
+  public void move(int chessPieceId, int toPositionX, int toPositionY) {
+    //...省略...
+  }
+}
+```
+在上面的代码实现中，我们利用工厂类来缓存 ChessPieceUnit 信息（也就是 id、text、color）。通过工厂类获取到的 ChessPieceUnit 就是享元。所有的 ChessBoard 对象共享这 30 个 ChessPieceUnit 对象（因为象棋中只有 30 个棋子）。在使用享元模式之前，记录 1 万个棋局，我们要创建 30 万（30*1 万）个棋子的 ChessPieceUnit 对象。利用享元模式，我们只需要创建 30 个享元对象供所有棋局共享使用即可，大大节省了内存。
+
+<u>实际上，它的代码实现非常简单，主要是通过工厂模式，在工厂类中，通过一个 Map 来缓存已经创建过的享元对象，来达到复用的目的。</u>
+
+#### 2.享元模式在文本编辑器中的应用
+
+你可以把这里提到的文本编辑器想象成 Office 的 Word。不过，为了简化需求背景，我们假设这个文本编辑器只实现了文字编辑功能，不包含图片、表格等复杂的编辑功能。对于简化之后的文本编辑器，我们要在内存中表示一个文本文件，只需要记录文字和格式两部分信息就可以了，其中，格式又包括文字的字体、大小、颜色等信息。
+
