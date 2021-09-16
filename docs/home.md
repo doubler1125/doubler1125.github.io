@@ -2759,3 +2759,589 @@ IUserController userController = (IUserController) proxy.createProxy(new UserCon
 
 ### 桥接模式
 
+桥接模式的代码实现非常简单，但是理解起来稍微有点难度，并且应用场景也比较局限，所以，相当于代理模式来说，桥接模式在实际的项目中并没有那么常用，你只需要简单了解，见到能认识就可以，并不是我们学习的重点。
+
+#### 1.桥接模式的原理解析
+
+桥接模式，也叫作桥梁模式，英文是 Bridge Design Pattern。这个模式可以说是 23 种设计模式中最难理解的模式之一了。
+
+桥接模式有两种理解方式。第一种理解方式是“将抽象和实现解耦，让它们能独立开发”。这种理解方式比较特别，应用场景也不多。另一种理解方式更加简单，类似“组合优于继承”设计原则，这种理解方式更加通用，应用场景比较多。不管是哪种理解方式，它们的代码结构都是相同的，都是一种类之间的组合关系。
+
+JDBC 驱动是桥接模式的经典应用。
+
+#### 2.桥接模式的应用举例
+
+我们讲过一个 API 接口监控告警的例子：根据不同的告警规则，触发不同类型的告警。告警支持多种通知渠道，包括：邮件、短信、微信、自动语音电话。通知的紧急程度有多种类型，包括：SEVERE（严重）、URGENCY（紧急）、NORMAL（普通）、TRIVIAL（无关紧要）。不同的紧急程度对应不同的通知渠道。比如，SERVE（严重）级别的消息会通过“自动语音电话”告知相关人员。
+
+我们先来看最简单、最直接的一种实现方式。代码如下所示：
+```java
+
+public enum NotificationEmergencyLevel {
+  SEVERE, URGENCY, NORMAL, TRIVIAL
+}
+
+public class Notification {
+  private List<String> emailAddresses;
+  private List<String> telephones;
+  private List<String> wechatIds;
+
+  public Notification() {}
+
+  public void setEmailAddress(List<String> emailAddress) {
+    this.emailAddresses = emailAddress;
+  }
+
+  public void setTelephones(List<String> telephones) {
+    this.telephones = telephones;
+  }
+
+  public void setWechatIds(List<String> wechatIds) {
+    this.wechatIds = wechatIds;
+  }
+
+  public void notify(NotificationEmergencyLevel level, String message) {
+    if (level.equals(NotificationEmergencyLevel.SEVERE)) {
+      //...自动语音电话
+    } else if (level.equals(NotificationEmergencyLevel.URGENCY)) {
+      //...发微信
+    } else if (level.equals(NotificationEmergencyLevel.NORMAL)) {
+      //...发邮件
+    } else if (level.equals(NotificationEmergencyLevel.TRIVIAL)) {
+      //...发邮件
+    }
+  }
+}
+
+//在API监控告警的例子中，我们如下方式来使用Notification类：
+public class ErrorAlertHandler extends AlertHandler {
+  public ErrorAlertHandler(AlertRule rule, Notification notification){
+    super(rule, notification);
+  }
+
+
+  @Override
+  public void check(ApiStatInfo apiStatInfo) {
+    if (apiStatInfo.getErrorCount() > rule.getMatchedRule(apiStatInfo.getApi()).getMaxErrorCount()) {
+      notification.notify(NotificationEmergencyLevel.SEVERE, "...");
+    }
+  }
+}
+```
+Notification 类的代码实现有一个最明显的问题，那就是有很多 if-else 分支逻辑。实际上，<u>如果每个分支中的代码都不复杂，后期也没有无限膨胀的可能（增加更多 if-else 分支判断），那这样的设计问题并不大，没必要非得一定要摒弃 if-else 分支逻辑。</u>
+
+不过，Notification 的代码显然不符合这个条件。因为每个 if-else 分支中的代码逻辑都比较复杂，发送通知的所有逻辑都扎堆在 Notification 类中。我们知道，类的代码越多，就越难读懂，越难修改，维护的成本也就越高。很多设计模式都是试图将庞大的类拆分成更细小的类，然后再通过某种更合理的结构组装在一起。
+
+针对 Notification 的代码，我们将不同渠道的发送逻辑剥离出来，形成独立的消息发送类（MsgSender 相关类）。其中，Notification 类相当于抽象，MsgSender 类相当于实现，两者可以独立开发，<u>通过组合关系（也就是桥梁）任意组合在一起。所谓任意组合的意思就是，不同紧急程度的消息和发送渠道之间的对应关系，不是在代码中固定写死的，我们可以动态地去指定（比如，通过读取配置来获取对应关系）。</u>
+
+重构之后的代码如下所示：
+```java
+
+public interface MsgSender {
+  void send(String message);
+}
+
+public class TelephoneMsgSender implements MsgSender {
+  private List<String> telephones;
+
+  public TelephoneMsgSender(List<String> telephones) {
+    this.telephones = telephones;
+  }
+
+  @Override
+  public void send(String message) {
+    //...
+  }
+
+}
+
+public class EmailMsgSender implements MsgSender {
+  // 与TelephoneMsgSender代码结构类似，所以省略...
+}
+
+public class WechatMsgSender implements MsgSender {
+  // 与TelephoneMsgSender代码结构类似，所以省略...
+}
+
+public abstract class Notification {
+  protected MsgSender msgSender;
+
+  public Notification(MsgSender msgSender) {
+    this.msgSender = msgSender;
+  }
+
+  public abstract void notify(String message);
+}
+
+public class SevereNotification extends Notification {
+  public SevereNotification(MsgSender msgSender) {
+    super(msgSender);
+  }
+
+  @Override
+  public void notify(String message) {
+    msgSender.send(message);
+  }
+}
+
+public class UrgencyNotification extends Notification {
+  // 与SevereNotification代码结构类似，所以省略...
+}
+public class NormalNotification extends Notification {
+  // 与SevereNotification代码结构类似，所以省略...
+}
+public class TrivialNotification extends Notification {
+  // 与SevereNotification代码结构类似，所以省略...
+}
+```
+
+### 装饰器模式
+
+<u>装饰器模式主要解决继承关系过于复杂的问题，通过组合来替代继承。它主要的作用是给原始类添加增强功能。这也是判断是否该用装饰器模式的一个重要的依据。
+
+除此之外，装饰器模式还有一个特点，那就是可以对原始类嵌套使用多个装饰器。为了满足这个应用场景，在设计的时候，装饰器类需要跟原始类继承相同的抽象类或者接口。</u>
+
+#### 1.实例：Java IO 类的“奇怪”用法
+
+Java IO 类库非常庞大和复杂，有几十个类，负责 IO 数据的读取和写入。如果对 Java IO 类做一下分类，我们可以将它划分为四类。针对不同的读取和写入场景，Java IO 又在这四个父类基础之上，扩展出了很多子类。具体如下所示：
+![](_images/2-6.jpg)
+在我初学 Java 的时候，曾经对 Java IO 的一些用法产生过很大疑惑，比如下面这样一段代码。我们打开文件 test.txt，从中读取数据。其中，InputStream 是一个抽象类，FileInputStream 是专门用来读取文件流的子类。BufferedInputStream 是一个支持带缓存功能的数据读取类，可以提高数据读取的效率。
+```java
+在我初学 Java 的时候，曾经对 Java IO 的一些用法产生过很大疑惑，比如下面这样一段代码。我们打开文件 test.txt，从中读取数据。其中，InputStream 是一个抽象类，FileInputStream 是专门用来读取文件流的子类。BufferedInputStream 是一个支持带缓存功能的数据读取类，可以提高数据读取的效率。
+```
+初看上面的代码，我们会觉得 Java IO 的用法比较麻烦，需要先创建一个 FileInputStream 对象，然后再传递给 BufferedInputStream 对象来使用。我在想，Java IO 为什么不设计一个继承 FileInputStream 并且支持缓存的 BufferedFileInputStream 类呢？这样我们就可以像下面的代码中这样，直接创建一个 BufferedFileInputStream 类对象，打开文件读取数据，用起来岂不是更加简单？
+```java
+
+InputStream bin = new BufferedFileInputStream("/user/wangzheng/test.txt");
+byte[] data = new byte[128];
+while (bin.read(data) != -1) {
+  //...
+}
+```
+**基于继承的设计方案**
+
+如果 InputStream 只有一个子类 FileInputStream 的话，那我们在 FileInputStream 基础之上，再设计一个孙子类 BufferedFileInputStream，也算是可以接受的，毕竟继承结构还算简单。但实际上，继承 InputStream 的子类有很多。我们需要给每一个 InputStream 的子类，再继续派生支持缓存读取的子类。
+
+除了支持缓存读取之外，如果我们还需要对功能进行其他方面的增强，比如DataInputStream支持按照基本数据类型（int、boolean、long 等）来读取数据。
+
+在这种情况下，如果我们继续按照继承的方式来实现的话，就需要再继续派生出 DataFileInputStream、DataPipedInputStream 等类。如果我们还需要既支持缓存、又支持按照基本类型读取数据的类，那就要再继续派生出 BufferedDataFileInputStream、BufferedDataPipedInputStream 等 n 多类。这还只是附加了两个增强功能，如果我们需要附加更多的增强功能，那就会导致组合爆炸，类继承结构变得无比复杂，代码既不好扩展，也不好维护。
+
+**基于装饰器模式的设计方案**
+
+针对刚刚的继承结构过于复杂的问题，我们可以通过将继承关系改为组合关系来解决。
+```java
+针对刚刚的继承结构过于复杂的问题，我们可以通过将继承关系改为组合关系来解决。
+```
+看了上面的代码，你可能会问，那装饰器模式就是简单的“用组合替代继承”吗？当然不是。从 Java IO 的设计来看，装饰器模式相对于简单的组合关系，还有两个比较特殊的地方:
+
+<u>第一个比较特殊的地方是：装饰器类和原始类继承同样的父类，这样我们可以对原始类“嵌套”多个装饰器类。</u>比如，下面这样一段代码，我们对 FileInputStream 嵌套了两个装饰器类：BufferedInputStream 和 DataInputStream，让它既支持缓存读取，又支持按照基本数据类型来读取数据。
+```java
+
+InputStream in = new FileInputStream("/user/wangzheng/test.txt");
+InputStream bin = new BufferedInputStream(in);
+DataInputStream din = new DataInputStream(bin);
+int data = din.readInt();
+```
+<u>第二个比较特殊的地方是：装饰器类是对功能的增强，这也是装饰器模式应用场景的一个重要特点。</u>实际上，符合“组合关系”这种代码结构的设计模式有很多，比如之前讲过的代理模式、桥接模式，还有现在的装饰器模式。尽管它们的代码结构很相似，但是每种设计模式的意图是不同的。就拿比较相似的代理模式和装饰器模式来说吧，<u>代理模式中，代理类附加的是跟原始类无关的功能，而在装饰器模式中，装饰器类附加的是跟原始类相关的增强功能。</u>
+```java
+
+// 代理模式的代码结构(下面的接口也可以替换成抽象类)
+public interface IA {
+  void f();
+}
+public class A impelements IA {
+  public void f() { //... }
+}
+public class AProxy implements IA {
+  private IA a;
+  public AProxy(IA a) {
+    this.a = a;
+  }
+  
+  public void f() {
+    // 新添加的代理逻辑
+    a.f();
+    // 新添加的代理逻辑
+  }
+}
+
+// 装饰器模式的代码结构(下面的接口也可以替换成抽象类)
+public interface IA {
+  void f();
+}
+public class A implements IA {
+  public void f() { //... }
+}
+public class ADecorator implements IA {
+  private IA a;
+  public ADecorator(IA a) {
+    this.a = a;
+  }
+  
+  public void f() {
+    // 功能增强代码
+    a.f();
+    // 功能增强代码
+  }
+}
+```
+实际上，如果去查看 JDK 的源码，你会发现，BufferedInputStream、DataInputStream 并非继承自 InputStream，而是另外一个叫 FilterInputStream 的类。那这又是出于什么样的设计意图，才引入这样一个类呢？
+
+我们再重新来看一下 BufferedInputStream 类的代码。InputStream 是一个抽象类而非接口，而且它的大部分函数（比如 read()、available()）都有默认实现，按理来说，我们只需要在 BufferedInputStream 类中重新实现那些需要增加缓存功能的函数就可以了，其他函数继承 InputStream 的默认实现。但实际上，这样做是行不通的。
+
+对于即便是不需要增加缓存功能的函数来说，BufferedInputStream 还是必须把它重新实现一遍，简单包裹对 InputStream 对象的函数调用。具体的代码示例如下所示。<u>如果不重新实现，那 BufferedInputStream 类就无法将最终读取数据的任务，委托给传递进来的 InputStream 对象来完成。</u>(解释：BufferedInputStream里面方法需要转发请求，调用传进来的inputStream的方法，如果不实现InputStream的方法，那就不能转发到传进来的InputStream，而是请求到抽象类inputStream了。而传进来的inputStream不一定是那个抽象类，有可能是添加了其他附加功能的类)
+```java
+
+public class BufferedInputStream extends InputStream {
+  protected volatile InputStream in;
+
+  protected BufferedInputStream(InputStream in) {
+    this.in = in;
+  }
+  
+  // f()函数不需要增强，只是重新调用一下InputStream in对象的f()
+  public void f() {
+    in.f();
+  }  
+}
+```
+实际上，DataInputStream 也存在跟 BufferedInputStream 同样的问题。为了避免代码重复，Java IO 抽象出了一个装饰器父类 FilterInputStream，代码实现如下所示。InputStream 的所有的装饰器类（BufferedInputStream、DataInputStream）都继承自这个装饰器父类。这样，装饰器类只需要实现它需要增强的方法就可以了，其他方法继承装饰器父类的默认实现。
+```java
+
+public class FilterInputStream extends InputStream {
+  protected volatile InputStream in;
+
+  protected FilterInputStream(InputStream in) {
+    this.in = in;
+  }
+
+  public int read() throws IOException {
+    return in.read();
+  }
+
+  public int read(byte b[]) throws IOException {
+    return read(b, 0, b.length);
+  }
+   
+  public int read(byte b[], int off, int len) throws IOException {
+    return in.read(b, off, len);
+  }
+
+  public long skip(long n) throws IOException {
+    return in.skip(n);
+  }
+
+  public int available() throws IOException {
+    return in.available();
+  }
+
+  public void close() throws IOException {
+    in.close();
+  }
+
+  public synchronized void mark(int readlimit) {
+    in.mark(readlimit);
+  }
+
+  public synchronized void reset() throws IOException {
+    in.reset();
+  }
+
+  public boolean markSupported() {
+    return in.markSupported();
+  }
+}
+```
+
+### 适配器模式
+
+#### 1.适配器模式的原理与实现
+
+> 适配器模式的英文翻译是 Adapter Design Pattern。顾名思义，这个模式就是用来做适配的，它将不兼容的接口转换为可兼容的接口，让原本由于接口不兼容而不能一起工作的类可以一起工作。
+
+对于这个模式，有一个经常被拿来解释它的例子，就是 USB 转接头充当适配器，把两种不兼容的接口，通过转接变得可以一起工作。
+
+适配器模式有两种实现方式：类适配器和对象适配器。其中，类适配器使用继承关系来实现，对象适配器使用组合关系来实现。
+
+具体的代码实现如下所示。其中，ITarget 表示要转化成的接口定义。Adaptee 是一组不兼容 ITarget 接口定义的接口，Adaptor 将 Adaptee 转化成一组符合 ITarget 接口定义的接口。
+```java
+
+// 类适配器: 基于继承
+public interface ITarget {
+  void f1();
+  void f2();
+  void fc();
+}
+
+public class Adaptee {
+  public void fa() { //... }
+  public void fb() { //... }
+  public void fc() { //... }
+}
+
+public class Adaptor extends Adaptee implements ITarget {
+  public void f1() {
+    super.fa();
+  }
+  
+  public void f2() {
+    //...重新实现f2()...
+  }
+  
+  // 这里fc()不需要实现，直接继承自Adaptee，这是跟对象适配器最大的不同点
+}
+
+// 对象适配器：基于组合
+public interface ITarget {
+  void f1();
+  void f2();
+  void fc();
+}
+
+public class Adaptee {
+  public void fa() { //... }
+  public void fb() { //... }
+  public void fc() { //... }
+}
+
+public class Adaptor implements ITarget {
+  private Adaptee adaptee;
+  
+  public Adaptor(Adaptee adaptee) {
+    this.adaptee = adaptee;
+  }
+  
+  public void f1() {
+    adaptee.fa(); //委托给Adaptee
+  }
+  
+  public void f2() {
+    //...重新实现f2()...
+  }
+  
+  public void fc() {
+    adaptee.fc();
+  }
+}
+```
+针对这两种实现方式，在实际的开发中，到底该如何选择使用哪一种呢？判断的标准主要有两个，一个是 Adaptee 接口的个数，另一个是 Adaptee 和 ITarget 的契合程度。
+
+- 如果 Adaptee 接口并不多，那两种实现方式都可以。
+- 如果 Adaptee 接口很多，而且 Adaptee 和 ITarget 接口定义大部分都相同，那我们推荐使用类适配器，因为 Adaptor 复用父类 Adaptee 的接口，比起对象适配器的实现方式，Adaptor 的代码量要少一些。
+- 如果 Adaptee 接口很多，而且 Adaptee 和 ITarget 接口定义大部分都不相同，那我们推荐使用对象适配器，因为组合结构相对于继承更加灵活。
+
+#### 2.适配器模式应用场景总结
+
+一般来说，适配器模式可以看作一种“补偿模式”，用来补救设计上的缺陷。应用这种模式算是“无奈之举”。
+
+**1. 封装有缺陷的接口设计**
+
+假设我们依赖的外部系统在接口设计方面有缺陷（比如包含大量静态方法），引入之后会影响到我们自身代码的可测试性。为了隔离设计上的缺陷，我们希望对外部系统提供的接口进行二次封装，抽象出更好的接口设计，这个时候就可以使用适配器模式了。
+```java
+
+public class CD { //这个类来自外部sdk，我们无权修改它的代码
+  //...
+  public static void staticFunction1() { //... }
+  
+  public void uglyNamingFunction2() { //... }
+
+  public void tooManyParamsFunction3(int paramA, int paramB, ...) { //... }
+  
+   public void lowPerformanceFunction4() { //... }
+}
+
+// 使用适配器模式进行重构
+public class ITarget {
+  void function1();
+  void function2();
+  void fucntion3(ParamsWrapperDefinition paramsWrapper);
+  void function4();
+  //...
+}
+// 注意：适配器类的命名不一定非得末尾带Adaptor
+public class CDAdaptor extends CD implements ITarget {
+  //...
+  public void function1() {
+     super.staticFunction1();
+  }
+  
+  public void function2() {
+    super.uglyNamingFucntion2();
+  }
+  
+  public void function3(ParamsWrapperDefinition paramsWrapper) {
+     super.tooManyParamsFunction3(paramsWrapper.getParamA(), ...);
+  }
+  
+  public void function4() {
+    //...reimplement it...
+  }
+}
+```
+**2. 统一多个类的接口设计**
+
+某个功能的实现依赖多个外部系统（或者说类）。通过适配器模式，将它们的接口适配为统一的接口定义，然后我们就可以使用多态的特性来复用代码逻辑。
+
+假设我们的系统要对用户输入的文本内容做敏感词过滤，为了提高过滤的召回率，我们引入了多款第三方敏感词过滤系统，依次对用户输入的内容进行过滤，过滤掉尽可能多的敏感词。但是，每个系统提供的过滤接口都是不同的。这就意味着我们没法复用一套逻辑来调用各个系统。这个时候，我们就可以使用适配器模式，将所有系统的接口适配为统一的接口定义，这样我们可以复用调用敏感词过滤的代码。
+```java
+
+public class ASensitiveWordsFilter { // A敏感词过滤系统提供的接口
+  //text是原始文本，函数输出用***替换敏感词之后的文本
+  public String filterSexyWords(String text) {
+    // ...
+  }
+  
+  public String filterPoliticalWords(String text) {
+    // ...
+  } 
+}
+
+public class BSensitiveWordsFilter  { // B敏感词过滤系统提供的接口
+  public String filter(String text) {
+    //...
+  }
+}
+
+public class CSensitiveWordsFilter { // C敏感词过滤系统提供的接口
+  public String filter(String text, String mask) {
+    //...
+  }
+}
+
+// 未使用适配器模式之前的代码：代码的可测试性、扩展性不好
+public class RiskManagement {
+  private ASensitiveWordsFilter aFilter = new ASensitiveWordsFilter();
+  private BSensitiveWordsFilter bFilter = new BSensitiveWordsFilter();
+  private CSensitiveWordsFilter cFilter = new CSensitiveWordsFilter();
+  
+  public String filterSensitiveWords(String text) {
+    String maskedText = aFilter.filterSexyWords(text);
+    maskedText = aFilter.filterPoliticalWords(maskedText);
+    maskedText = bFilter.filter(maskedText);
+    maskedText = cFilter.filter(maskedText, "***");
+    return maskedText;
+  }
+}
+
+// 使用适配器模式进行改造
+public interface ISensitiveWordsFilter { // 统一接口定义
+  String filter(String text);
+}
+
+public class ASensitiveWordsFilterAdaptor implements ISensitiveWordsFilter {
+  private ASensitiveWordsFilter aFilter;
+  public String filter(String text) {
+    String maskedText = aFilter.filterSexyWords(text);
+    maskedText = aFilter.filterPoliticalWords(maskedText);
+    return maskedText;
+  }
+}
+//...省略BSensitiveWordsFilterAdaptor、CSensitiveWordsFilterAdaptor...
+
+// 扩展性更好，更加符合开闭原则，如果添加一个新的敏感词过滤系统，
+// 这个类完全不需要改动；而且基于接口而非实现编程，代码的可测试性更好。
+public class RiskManagement { 
+  private List<ISensitiveWordsFilter> filters = new ArrayList<>();
+ 
+  public void addSensitiveWordsFilter(ISensitiveWordsFilter filter) {
+    filters.add(filter);
+  }
+  
+  public String filterSensitiveWords(String text) {
+    String maskedText = text;
+    for (ISensitiveWordsFilter filter : filters) {
+      maskedText = filter.filter(maskedText);
+    }
+    return maskedText;
+  }
+}
+```
+**3. 替换依赖的外部系统**
+
+当我们把项目中依赖的一个外部系统替换为另一个外部系统的时候，利用适配器模式，可以减少对代码的改动。具体的代码示例如下所示：
+```java
+
+// 外部系统A
+public interface IA {
+  //...
+  void fa();
+}
+public class A implements IA {
+  //...
+  public void fa() { //... }
+}
+// 在我们的项目中，外部系统A的使用示例
+public class Demo {
+  private IA a;
+  public Demo(IA a) {
+    this.a = a;
+  }
+  //...
+}
+Demo d = new Demo(new A());
+
+// 将外部系统A替换成外部系统B
+public class BAdaptor implemnts IA {
+  private B b;
+  public BAdaptor(B b) {
+    this.b= b;
+  }
+  public void fa() {
+    //...
+    b.fb();
+  }
+}
+// 借助BAdaptor，Demo的代码中，调用IA接口的地方都无需改动，
+// 只需要将BAdaptor如下注入到Demo即可。
+Demo d = new Demo(new BAdaptor(new B()));
+```
+**4. 兼容老版本接口**
+
+在做版本升级的时候，对于一些要废弃的接口，我们不直接将其删除，而是暂时保留，并且标注为 deprecated，并将内部实现逻辑委托为新的接口实现。这样做的好处是，让使用它的项目有个过渡期，而不是强制进行代码修改
+
+同样，我还是通过一个例子，来进一步解释一下。
+
+JDK1.0 中包含一个遍历集合容器的类 Enumeration。JDK2.0 对这个类进行了重构，将它改名为 Iterator 类，并且对它的代码实现做了优化。但是考虑到如果将 Enumeration 直接从 JDK2.0 中删除，那使用 JDK1.0 的项目如果切换到 JDK2.0，代码就会编译不通过。为了避免这种情况的发生，我们必须把项目中所有使用到 Enumeration 的地方，都修改为使用 Iterator 才行。
+
+单独一个项目做 Enumeration 到 Iterator 的替换，勉强还能接受。但是，使用 Java 开发的项目太多了，一次 JDK 的升级，导致所有的项目不做代码修改就会编译报错，这显然是不合理的。这就是我们经常所说的不兼容升级。为了做到兼容使用低版本 JDK 的老代码，我们可以暂时保留 Enumeration 类，并将其实现替换为直接调用 Itertor。代码示例如下所示：
+```java
+
+public class Collections {
+  public static Emueration emumeration(final Collection c) {
+    return new Enumeration() {
+      Iterator i = c.iterator();
+      
+      public boolean hasMoreElments() {
+        return i.hashNext();
+      }
+      
+      public Object nextElement() {
+        return i.next():
+      }
+    }
+  }
+}
+```
+**5. 适配不同格式的数据**
+
+前面我们讲到，适配器模式主要用于接口的适配，实际上，它还可以用在不同格式的数据之间的适配。比如，把从不同征信系统拉取的不同格式的征信数据，统一为相同的格式，以方便存储和使用。再比如，Java 中的 Arrays.asList() 也可以看作一种数据适配器，将数组类型的数据转化为集合容器类型。
+```java
+
+List<String> stooges = Arrays.asList("Larry", "Moe", "Curly");
+```
+#### 3.代理、桥接、装饰器、适配器 4 种设计模式的区别
+
+
+代理、桥接、装饰器、适配器，这 4 种模式是比较常用的结构型设计模式。它们的代码结构非常相似。<u>笼统来说，它们都可以称为 Wrapper 模式，也就是通过 Wrapper 类二次封装原始类。</u>
+
+尽管代码结构相似，但这 4 种设计模式的用意完全不同，也就是说要解决的问题、应用场景不同，这也是它们的主要区别。这里我就简单说一下它们之间的区别。
+
+**代理模式：**代理模式在不改变原始类接口的条件下，为原始类定义一个代理类，<u>主要目的是控制访问，而非加强功能，这是它跟装饰器模式最大的不同。</u>
+
+**桥接模式：**桥接模式的目的是将接口部分和实现部分分离，从而让它们可以较为容易、也相对独立地加以改变。
+
+**装饰器模式：**<u>装饰者模式在不改变原始类接口的情况下，对原始类功能进行增强，并且支持多个装饰器的嵌套使用。</u>
+
+**适配器模式：**<u>适配器模式是一种事后的补救策略。适配器提供跟原始类不同的接口，而代理模式、装饰器模式提供的都是跟原始类相同的接口。</u>
+
+### 门面模式
+
