@@ -3721,3 +3721,163 @@ public class Editor {
 
 
 ## 设计模式与范式：行为型
+
+<u>创建型设计模式主要解决“对象的创建”问题，结构型设计模式主要解决“类或对象的组合或组装”问题，那行为型设计模式主要解决的就是“类或对象之间的交互”问题。</u>
+
+行为型设计模式比较多，有 11 个，几乎占了 23 种经典设计模式的一半。它们分别是：观察者模式、模板模式、策略模式、职责链模式、状态模式、迭代器模式、访问者模式、备忘录模式、命令模式、解释器模式、中介模式。
+
+### 观察者模式
+
+#### 1.原理及应用场景剖析
+
+> 观察者模式（Observer Design Pattern）也被称为发布订阅模式（Publish-Subscribe Design Pattern）。在对象之间定义一个一对多的依赖，当一个对象状态改变的时候，所有依赖的对象都会自动收到通知。
+
+被依赖的对象叫作被观察者（Observable），依赖的对象叫作观察者（Observer）。
+
+观察者模式是一个比较抽象的模式，根据不同的应用场景和需求，有完全不同的实现方式，我们先来看其中最经典的一种实现方式：
+```java
+
+public interface Subject {
+  void registerObserver(Observer observer);
+  void removeObserver(Observer observer);
+  void notifyObservers(Message message);
+}
+
+public interface Observer {
+  void update(Message message);
+}
+
+public class ConcreteSubject implements Subject {
+  private List<Observer> observers = new ArrayList<Observer>();
+
+  @Override
+  public void registerObserver(Observer observer) {
+    observers.add(observer);
+  }
+
+  @Override
+  public void removeObserver(Observer observer) {
+    observers.remove(observer);
+  }
+
+  @Override
+  public void notifyObservers(Message message) {
+    for (Observer observer : observers) {
+      observer.update(message);
+    }
+  }
+
+}
+
+public class ConcreteObserverOne implements Observer {
+  @Override
+  public void update(Message message) {
+    //TODO: 获取消息通知，执行自己的逻辑...
+    System.out.println("ConcreteObserverOne is notified.");
+  }
+}
+
+public class ConcreteObserverTwo implements Observer {
+  @Override
+  public void update(Message message) {
+    //TODO: 获取消息通知，执行自己的逻辑...
+    System.out.println("ConcreteObserverTwo is notified.");
+  }
+}
+
+public class Demo {
+  public static void main(String[] args) {
+    ConcreteSubject subject = new ConcreteSubject();
+    subject.registerObserver(new ConcreteObserverOne());
+    subject.registerObserver(new ConcreteObserverTwo());
+    subject.notifyObservers(new Message());
+  }
+}
+```
+
+什么情况下需要用到这种设计模式？或者说，这种设计模式能解决什么问题呢？
+
+假设我们在开发一个 P2P 投资理财系统，用户注册成功之后，我们会给用户发放投资体验金。代码实现大致是下面这个样子的：
+```java
+
+public class UserController {
+  private UserService userService; // 依赖注入
+  private PromotionService promotionService; // 依赖注入
+
+  public Long register(String telephone, String password) {
+    //省略输入参数的校验代码
+    //省略userService.register()异常的try-catch代码
+    long userId = userService.register(telephone, password);
+    promotionService.issueNewUserExperienceCash(userId);
+    return userId;
+  }
+}
+```
+虽然注册接口做了两件事情，注册和发放体验金，违反单一职责原则，但是，如果没有扩展和修改的需求，现在的代码实现是可以接受的。如果非得用观察者模式，就需要引入更多的类和更加复杂的代码结构，反倒是一种过度设计。
+
+相反，如果需求频繁变动，比如，用户注册成功之后，不再发放体验金，而是改为发放优惠券，并且还要给用户发送一封“欢迎注册成功”的站内信。这种情况下，我们就需要频繁地修改 register() 函数中的代码，违反开闭原则。而且，如果注册成功之后需要执行的后续操作越来越多，那 register() 函数的逻辑会变得越来越复杂，也就影响到代码的可读性和可维护性。
+
+这个时候，观察者模式就能派上用场了。利用观察者模式，我对上面的代码进行了重构。重构之后的代码如下所示：
+```java
+
+public interface RegObserver {
+  void handleRegSuccess(long userId);
+}
+
+public class RegPromotionObserver implements RegObserver {
+  private PromotionService promotionService; // 依赖注入
+
+  @Override
+  public void handleRegSuccess(long userId) {
+    promotionService.issueNewUserExperienceCash(userId);
+  }
+}
+
+public class RegNotificationObserver implements RegObserver {
+  private NotificationService notificationService;
+
+  @Override
+  public void handleRegSuccess(long userId) {
+    notificationService.sendInboxMessage(userId, "Welcome...");
+  }
+}
+
+public class UserController {
+  private UserService userService; // 依赖注入
+  private List<RegObserver> regObservers = new ArrayList<>();
+
+  // 一次性设置好，之后也不可能动态的修改
+  public void setRegObservers(List<RegObserver> observers) {
+    regObservers.addAll(observers);
+  }
+
+  public Long register(String telephone, String password) {
+    //省略输入参数的校验代码
+    //省略userService.register()异常的try-catch代码
+    long userId = userService.register(telephone, password);
+
+    for (RegObserver observer : regObservers) {
+      observer.handleRegSuccess(userId);
+    }
+
+    return userId;
+  }
+}
+```
+当我们需要添加新的观察者的时候，比如，用户注册成功之后，推送用户注册信息给大数据征信系统，基于观察者模式的代码实现，UserController 类的 register() 函数完全不需要修改，只需要再添加一个实现了 RegObserver 接口的类，并且通过 setRegObservers() 函数将它注册到 UserController 类中即可。
+
+**设计模式要干的事情就是解耦。创建型模式是将创建和使用代码解耦，结构型模式是将不同功能代码解耦，行为型模式是将不同的行为代码解耦，具体到观察者模式，它是将观察者和被观察者代码解耦。**
+
+#### 2.基于不同应用场景的不同实现方式
+
+不同的应用场景和需求下，这个模式也有截然不同的实现方式，<u>有同步阻塞的实现方式，也有异步非阻塞的实现方式；有进程内的实现方式，也有跨进程的实现方式。</u>
+
+之前讲到的实现方式，从刚刚的分类方式上来看，它是一种**同步阻塞的实现方式**。观察者和被观察者代码在同一个线程内执行，被观察者一直阻塞，直到所有的观察者代码都执行完成之后，才执行后续的代码。如果注册接口是一个调用比较频繁的接口，对性能非常敏感，希望接口的响应时间尽可能短，那我们可以将同步阻塞的实现方式改为**异步非阻塞的实现方式**，以此来减少响应时间。
+
+刚刚讲到的两个场景，不管是同步阻塞实现方式还是异步非阻塞实现方式，**都是进程内的实现方式**。如果用户注册成功之后，我们需要发送用户信息给大数据征信系统，而大数据征信系统是一个独立的系统，跟它之间的交互是跨不同进程的，那如何实现一个跨进程的观察者模式呢？
+
+如果大数据征信系统提供了发送用户注册信息的 RPC 接口，我们仍然可以沿用之前的实现思路，在 handleRegSuccess() 函数中调用 RPC 接口来发送数据。但是，<u>我们还有更加优雅、更加常用的一种实现方式，那就是**基于消息队列（Message Queue，比如 ActiveMQ）来实现。**</u>
+
+当然，这种实现方式也有弊端，那就是需要引入一个新的系统（消息队列），增加了维护成本。不过，它的好处也非常明显。在原来的实现方式中，观察者需要注册到被观察者中，被观察者需要依次遍历观察者来发送消息。而基于消息队列的实现方式，被观察者和观察者解耦更加彻底，两部分的耦合更小。被观察者完全不感知观察者，同理，观察者也完全不感知被观察者。被观察者只管发送消息到消息队列，观察者只管从消息队列中读取消息来执行相应的逻辑。
+
+#### 2.异步非阻塞观察者模式的简易实现
