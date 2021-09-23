@@ -1,7 +1,6 @@
-[doubler1125]:https://github.com/doubler1125/doubler1125.github.io/blob/main/docs/_images/
 # 编写高质量代码
 
-[doubler1125]/1-1.jpg
+![编写高质量代码](_images/1-1.jpg '编写高质量代码')
 ## 设计原则与思想：面向对象
 ### 面向对象在谈论什么？
 #### 什么是面向对象编程和面向对象编程语言？
