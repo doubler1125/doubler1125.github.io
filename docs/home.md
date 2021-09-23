@@ -3881,3 +3881,514 @@ public class UserController {
 当然，这种实现方式也有弊端，那就是需要引入一个新的系统（消息队列），增加了维护成本。不过，它的好处也非常明显。在原来的实现方式中，观察者需要注册到被观察者中，被观察者需要依次遍历观察者来发送消息。而基于消息队列的实现方式，被观察者和观察者解耦更加彻底，两部分的耦合更小。被观察者完全不感知观察者，同理，观察者也完全不感知被观察者。被观察者只管发送消息到消息队列，观察者只管从消息队列中读取消息来执行相应的逻辑。
 
 #### 2.异步非阻塞观察者模式的简易实现
+
+我们讲到，对于异步非阻塞观察者模式，如果只是实现一个简易版本，不考虑任何通用性、复用性，实际上是非常容易的。
+
+我们有两种实现方式。其中一种是：在每个 handleRegSuccess() 函数中创建一个新的线程执行代码逻辑；另一种是：在 UserController 的 register() 函数中使用线程池来执行每个观察者的 handleRegSuccess() 函数。两种实现方式的具体代码如下所示：
+```java
+
+// 第一种实现方式，其他类代码不变，就没有再重复罗列
+public class RegPromotionObserver implements RegObserver {
+  private PromotionService promotionService; // 依赖注入
+
+  @Override
+  public void handleRegSuccess(Long userId) {
+    Thread thread = new Thread(new Runnable() {
+      @Override
+      public void run() {
+        promotionService.issueNewUserExperienceCash(userId);
+      }
+    });
+    thread.start();
+  }
+}
+
+// 第二种实现方式，其他类代码不变，就没有再重复罗列
+public class UserController {
+  private UserService userService; // 依赖注入
+  private List<RegObserver> regObservers = new ArrayList<>();
+  private Executor executor;
+
+  public UserController(Executor executor) {
+    this.executor = executor;
+  }
+
+  public void setRegObservers(List<RegObserver> observers) {
+    regObservers.addAll(observers);
+  }
+
+  public Long register(String telephone, String password) {
+    //省略输入参数的校验代码
+    //省略userService.register()异常的try-catch代码
+    long userId = userService.register(telephone, password);
+
+    for (RegObserver observer : regObservers) {
+      executor.execute(new Runnable() {
+        @Override
+        public void run() {
+          observer.handleRegSuccess(userId);
+        }
+      });
+    }
+
+    return userId;
+  }
+}
+```
+对于第一种实现方式，频繁地创建和销毁线程比较耗时，并且并发线程数无法控制，创建过多的线程会导致堆栈溢出。第二种实现方式，尽管利用了线程池解决了第一种实现方式的问题，但线程池、异步执行逻辑都耦合在了 register() 函数中，增加了这部分业务代码的维护成本。
+
+如果我们的需求更加极端一点，需要在同步阻塞和异步非阻塞之间灵活切换，那就要不停地修改 UserController 的代码。除此之外，如果在项目中，不止一个业务模块需要用到异步非阻塞观察者模式，那这样的代码实现也无法做到复用
+
+<u>框架的作用有：隐藏实现细节，降低开发难度，做到代码复用，解耦业务与非业务代码，让程序员聚焦业务开发。</u>针对异步非阻塞观察者模式，我们也可以将它抽象成框架来达到这样的效果，而这个框架就是我们这节课要讲的 EventBus。
+
+**手把手实现一个 EventBus 框架**
+
+我们重点来看，EventBus 中两个核心函数 register() 和 post() 的实现原理。弄懂了它们，基本上就弄懂了整个 EventBus 框架。下面两张图是这两个函数的实现原理图。
+![](_images/2-8.jpg)
+![](_images/2-9.jpg)
+从图中我们可以看出，最关键的一个数据结构是 Observer 注册表，记录了消息类型和可接收消息函数的对应关系。当调用 register() 函数注册观察者的时候，EventBus 通过解析 @Subscribe 注解，生成 Observer 注册表。
+
+当调用 post() 函数发送消息的时候，EventBus 通过注册表找到相应的可接收消息的函数，然后通过 Java 的反射语法来动态地创建对象、执行函数。对于同步阻塞模式，EventBus 在一个线程内依次执行相应的函数。对于异步非阻塞模式，EventBus 通过一个线程池来执行相应的函数。
+
+整个小框架的代码实现包括 5 个类：EventBus、AsyncEventBus、Subscribe、ObserverAction、ObserverRegistry。接下来，我们依次来看下这 5 个类。
+
+- 1.Subscribe
+
+Subscribe 是一个注解，用于标明观察者中的哪个函数可以接收消息。
+```java
+
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.METHOD)
+@Beta
+public @interface Subscribe {}
+```
+
+- 2.ObserverAction
+
+ObserverAction 类用来表示 @Subscribe 注解的方法，其中，target 表示观察者类，method 表示方法。它主要用在 ObserverRegistry 观察者注册表中。
+```java
+
+public class ObserverAction {
+  private Object target;
+  private Method method;
+
+  public ObserverAction(Object target, Method method) {
+    this.target = Preconditions.checkNotNull(target);
+    this.method = method;
+    this.method.setAccessible(true);
+  }
+
+  public void execute(Object event) { // event是method方法的参数
+    try {
+      method.invoke(target, event);
+    } catch (InvocationTargetException | IllegalAccessException e) {
+      e.printStackTrace();
+    }
+  }
+}
+```
+
+- 3.ObserverRegistry
+
+ObserverRegistry 类就是前面讲到的 Observer 注册表，是最复杂的一个类，框架中几乎所有的核心逻辑都在这个类中。这个类大量使用了 Java 的反射语法，不过代码整体来说都不难理解，其中，一个比较有技巧的地方是 CopyOnWriteArraySet 的使用。
+
+CopyOnWriteArraySet，顾名思义，在写入数据的时候，会创建一个新的 set，并且将原始数据 clone 到新的 set 中，在新的 set 中写入数据完成之后，再用新的 set 替换老的 set。这样就能保证在写入数据的时候，不影响数据的读取操作，以此来解决读写并发问题。除此之外，CopyOnWriteSet 还通过加锁的方式，避免了并发写冲突。具体的作用你可以去查看一下 CopyOnWriteSet 类的源码，一目了然。
+```java
+
+public class ObserverRegistry {
+  private ConcurrentMap<Class<?>, CopyOnWriteArraySet<ObserverAction>> registry = new ConcurrentHashMap<>();
+
+  public void register(Object observer) {
+    Map<Class<?>, Collection<ObserverAction>> observerActions = findAllObserverActions(observer);
+    for (Map.Entry<Class<?>, Collection<ObserverAction>> entry : observerActions.entrySet()) {
+      Class<?> eventType = entry.getKey();
+      Collection<ObserverAction> eventActions = entry.getValue();
+      CopyOnWriteArraySet<ObserverAction> registeredEventActions = registry.get(eventType);
+      if (registeredEventActions == null) {
+        registry.putIfAbsent(eventType, new CopyOnWriteArraySet<>());
+        registeredEventActions = registry.get(eventType);
+      }
+      registeredEventActions.addAll(eventActions);
+    }
+  }
+
+  public List<ObserverAction> getMatchedObserverActions(Object event) {
+    List<ObserverAction> matchedObservers = new ArrayList<>();
+    Class<?> postedEventType = event.getClass();
+    for (Map.Entry<Class<?>, CopyOnWriteArraySet<ObserverAction>> entry : registry.entrySet()) {
+      Class<?> eventType = entry.getKey();
+      Collection<ObserverAction> eventActions = entry.getValue();
+      if (postedEventType.isAssignableFrom(eventType)) {
+        matchedObservers.addAll(eventActions);
+      }
+    }
+    return matchedObservers;
+  }
+
+  private Map<Class<?>, Collection<ObserverAction>> findAllObserverActions(Object observer) {
+    Map<Class<?>, Collection<ObserverAction>> observerActions = new HashMap<>();
+    Class<?> clazz = observer.getClass();
+    for (Method method : getAnnotatedMethods(clazz)) {
+      Class<?>[] parameterTypes = method.getParameterTypes();
+      Class<?> eventType = parameterTypes[0];
+      if (!observerActions.containsKey(eventType)) {
+        observerActions.put(eventType, new ArrayList<>());
+      }
+      observerActions.get(eventType).add(new ObserverAction(observer, method));
+    }
+    return observerActions;
+  }
+
+  private List<Method> getAnnotatedMethods(Class<?> clazz) {
+    List<Method> annotatedMethods = new ArrayList<>();
+    for (Method method : clazz.getDeclaredMethods()) {
+      if (method.isAnnotationPresent(Subscribe.class)) {
+        Class<?>[] parameterTypes = method.getParameterTypes();
+        Preconditions.checkArgument(parameterTypes.length == 1,
+                "Method %s has @Subscribe annotation but has %s parameters."
+                        + "Subscriber methods must have exactly 1 parameter.",
+                method, parameterTypes.length);
+        annotatedMethods.add(method);
+      }
+    }
+    return annotatedMethods;
+  }
+}
+```
+
+- 4.EventBus
+
+EventBus 实现的是阻塞同步的观察者模式。看代码你可能会有些疑问，这明明就用到了线程池 Executor 啊。实际上，MoreExecutors.directExecutor() 是 Google Guava 提供的工具类，看似是多线程，实际上是单线程。之所以要这么实现，主要还是为了跟 AsyncEventBus 统一代码逻辑，做到代码复用。
+```java
+
+public class EventBus {
+  private Executor executor;
+  private ObserverRegistry registry = new ObserverRegistry();
+
+  public EventBus() {
+    this(MoreExecutors.directExecutor());
+  }
+
+  protected EventBus(Executor executor) {
+    this.executor = executor;
+  }
+
+  public void register(Object object) {
+    registry.register(object);
+  }
+
+  public void post(Object event) {
+    List<ObserverAction> observerActions = registry.getMatchedObserverActions(event);
+    for (ObserverAction observerAction : observerActions) {
+      executor.execute(new Runnable() {
+        @Override
+        public void run() {
+          observerAction.execute(event);
+        }
+      });
+    }
+  }
+}
+```
+
+- 5.AsyncEventBus
+
+有了 EventBus，AsyncEventBus 的实现就非常简单了。为了实现异步非阻塞的观察者模式，它就不能再继续使用 MoreExecutors.directExecutor() 了，而是需要在构造函数中，由调用者注入线程池。
+```java
+
+public class AsyncEventBus extends EventBus {
+  public AsyncEventBus(Executor executor) {
+    super(executor);
+  }
+}
+```
+至此，我们用了不到 200 行代码，就实现了一个还算凑活能用的 EventBus，从功能上来讲，它跟 Google Guava EventBus 几乎一样。不过，如果去查看[Google Guava EventBus 的源码](https://github.com/google/guava)，你会发现，在实现细节方面，相比我们现在的实现，它其实做了很多优化，比如优化了在注册表中查找消息可匹配函数的算法
+
+### 模版模式
+
+#### 1.模板模式的原理与实现
+
+> 模板方法模式在一个方法中定义一个算法骨架，并将某些步骤推迟到子类中实现。模板方法模式可以让子类在不改变算法整体结构的情况下，重新定义算法中的某些步骤。
+
+这里的“算法”，我们可以理解为广义上的“业务逻辑”，并不特指数据结构和算法中的“算法”。这里的算法骨架就是“模板”，包含算法骨架的方法就是“模板方法”，这也是模板方法模式名字的由来
+
+示例代码，如下所示:
+```java
+
+public abstract class AbstractClass {
+  public final void templateMethod() {
+    //...
+    method1();
+    //...
+    method2();
+    //...
+  }
+  
+  protected abstract void method1();
+  protected abstract void method2();
+}
+
+public class ConcreteClass1 extends AbstractClass {
+  @Override
+  protected void method1() {
+    //...
+  }
+  
+  @Override
+  protected void method2() {
+    //...
+  }
+}
+
+public class ConcreteClass2 extends AbstractClass {
+  @Override
+  protected void method1() {
+    //...
+  }
+  
+  @Override
+  protected void method2() {
+    //...
+  }
+}
+
+AbstractClass demo = ConcreteClass1();
+demo.templateMethod();
+```
+templateMethod() 函数定义为 final，是为了避免子类重写它。method1() 和 method2() 定义为 abstract，是为了强迫子类去实现。不过，这些都不是必须的，在实际的项目开发中，模板模式的代码实现比较灵活.
+
+##### 模板模式作用一：复用
+
+模板模式有两大作用：复用和扩展。我们先来看它的第一个作用：复用。
+
+<u>模板模式把一个算法中不变的流程抽象到父类的模板方法 templateMethod() 中，将可变的部分 method1()、method2() 留给子类 ContreteClass1 和 ContreteClass2 来实现。所有的子类都可以复用父类中模板方法定义的流程代码。</u>
+
+- 1.Java InputStream
+
+Java IO 类库中，有很多类的设计用到了模板模式，比如 InputStream、OutputStream、Reader、Writer。我们拿 InputStream 来举例说明一下。
+
+我把 InputStream 部分相关代码贴在了下面。在代码中，read() 函数是一个模板方法，定义了读取数据的整个流程，并且暴露了一个可以由子类来定制的抽象方法。不过这个方法也被命名为了 read().
+```java
+
+public abstract class InputStream implements Closeable {
+  //...省略其他代码...
+  
+  public int read(byte b[], int off, int len) throws IOException {
+    if (b == null) {
+      throw new NullPointerException();
+    } else if (off < 0 || len < 0 || len > b.length - off) {
+      throw new IndexOutOfBoundsException();
+    } else if (len == 0) {
+      return 0;
+    }
+
+    int c = read();
+    if (c == -1) {
+      return -1;
+    }
+    b[off] = (byte)c;
+
+    int i = 1;
+    try {
+      for (; i < len ; i++) {
+        c = read();
+        if (c == -1) {
+          break;
+        }
+        b[off + i] = (byte)c;
+      }
+    } catch (IOException ee) {
+    }
+    return i;
+  }
+  
+  public abstract int read() throws IOException;
+}
+
+public class ByteArrayInputStream extends InputStream {
+  //...省略其他代码...
+  
+  @Override
+  public synchronized int read() {
+    return (pos < count) ? (buf[pos++] & 0xff) : -1;
+  }
+}
+```
+- 2.Java AbstractList
+
+在 Java AbstractList 类中，addAll() 函数可以看作模板方法，add() 是子类需要重写的方法，尽管没有声明为 abstract 的，但函数实现直接抛出了 UnsupportedOperationException 异常。前提是，如果子类不重写是不能使用的。
+```java
+
+public boolean addAll(int index, Collection<? extends E> c) {
+    rangeCheckForAdd(index);
+    boolean modified = false;
+    for (E e : c) {
+        add(index++, e);
+        modified = true;
+    }
+    return modified;
+}
+
+public void add(int index, E element) {
+    throw new UnsupportedOperationException();
+}
+```
+
+##### 模板模式作用二：扩展
+
+模板模式的第二大作用的是扩展。基于这个作用，模板模式常用在框架的开发中，让框架用户可以在不修改框架源码的情况下，定制化框架的功能。我们通过 Junit TestCase、Java Servlet 两个例子来解释一下。
+
+- 1.Java Servlet
+
+对于 Java Web 项目开发来说，常用的开发框架是 SpringMVC。利用它，我们只需要关注业务代码的编写，底层的原理几乎不会涉及。但是，如果我们抛开这些高级框架来开发 Web 项目，必然会用到 Servlet。实际上，使用比较底层的 Servlet 来开发 Web 项目也不难。我们只需要定义一个继承 HttpServlet 的类，并且重写其中的 doGet() 或 doPost() 方法，来分别处理 get 和 post 请求。具体的代码示例如下所示：
+```java
+
+public class HelloServlet extends HttpServlet {
+  @Override
+  protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
+    this.doPost(req, resp);
+  }
+  
+  @Override
+  protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
+    resp.getWriter().write("Hello World.");
+  }
+}
+```
+HttpServlet 的 service() 方法就是一个模板方法，它实现了整个 HTTP 请求的执行流程，doGet()、doPost() 是模板中可以由子类来定制的部分。实际上，这就相当于 Servlet 框架提供了一个扩展点（doGet()、doPost() 方法），让框架用户在不用修改 Servlet 框架源码的情况下，将业务代码通过扩展点镶嵌到框架中执行。
+
+- 2.JUnit TestCase
+
+跟 Java Servlet 类似，JUnit 框架也通过模板模式提供了一些功能扩展点（setUp()、tearDown() 等），让框架用户可以在这些扩展点上扩展功能。
+
+在使用 JUnit 测试框架来编写单元测试的时候，我们编写的测试类都要继承框架提供的 TestCase 类。在 TestCase 类中，runBare() 函数是模板方法，它定义了执行测试用例的整体流程：先执行 setUp() 做些准备工作，然后执行 runTest() 运行真正的测试代码，最后执行 tearDown() 做扫尾工作。
+
+#### 2.回调的原理解析
+
+> 相对于普通的函数调用，回调是一种双向调用关系。A 类事先注册某个函数 F 到 B 类，A 类在调用 B 类的 P 函数的时候，B 类反过来调用 A 类注册给它的 F 函数。这里的 F 函数就是“回调函数”。A 调用 B，B 反过来又调用 A，这种调用机制就叫作“回调”。
+
+复用和扩展是模板模式的两大作用，实际上，还有另外一个技术概念，也能起到跟模板模式相同的作用，那就是**回调（Callback）**。
+
+A 类如何将回调函数传递给 B 类呢？不同的编程语言，有不同的实现方法。C 语言可以使用函数指针，Java 则需要使用包裹了回调函数的类对象，我们简称为回调对象。这里我用 Java 语言举例说明一下。代码如下所示：
+```java
+
+public interface ICallback {
+  void methodToCallback();
+}
+
+public class BClass {
+  public void process(ICallback callback) {
+    //...
+    callback.methodToCallback();
+    //...
+  }
+}
+
+public class AClass {
+  public static void main(String[] args) {
+    BClass b = new BClass();
+    b.process(new ICallback() { //回调对象
+      @Override
+      public void methodToCallback() {
+        System.out.println("Call back me.");
+      }
+    });
+  }
+}
+```
+上面就是 Java 语言中回调的典型代码实现。从代码实现中，我们可以看出，回调跟模板模式一样，也具有复用和扩展的功能。除了回调函数之外，BClass 类的 process() 函数中的逻辑都可以复用。如果 ICallback、BClass 类是框架代码，AClass 是使用框架的客户端代码，我们可以通过 ICallback 定制 process() 函数，也就是说，框架因此具有了扩展的能力。
+
+<u>实际上，回调不仅可以应用在代码设计上，在更高层次的架构设计上也比较常用。比如，通过三方支付系统来实现支付功能，用户在发起支付请求之后，一般不会一直阻塞到支付结果返回，而是注册回调接口（类似回调函数，一般是一个回调用的 URL）给三方支付系统，等三方支付系统执行完成之后，将结果通过回调接口返回给用户。</u>
+
+回调可以分为同步回调和异步回调（或者延迟回调）。同步回调指在函数返回之前执行回调函数；异步回调指的是在函数返回之后执行回调函数。上面的代码实际上是同步回调的实现方式，在 process() 函数返回之前，执行完回调函数 methodToCallback()。而上面支付的例子是异步回调的实现方式，发起支付之后不需要等待回调接口被调用就直接返回。
+
+<u>从应用场景上来看，**同步回调看起来更像模板模式，异步回调看起来更像观察者模式**。从代码实现上来看，回调基于组合关系来实现，把一个对象传递给另一个对象，是一种对象之间的关系；模板模式基于继承关系来实现，子类重写父类的抽象方法，是一种类之间的关系。</u>
+
+前面我们也讲到，组合优于继承。实际上，这里也不例外。在代码实现上，回调相对于模板模式会更加灵活，主要体现在下面几点。
+- 像 Java 这种只支持单继承的语言，基于模板模式编写的子类，已经继承了一个父类，不再具有继承的能力。
+- 回调可以使用匿名类来创建回调对象，可以不用事先定义类；而模板模式针对不同的实现都要定义不同的子类。
+- <u>如果某个类中定义了多个模板方法，每个方法都有对应的抽象方法，那即便我们只用到其中的一个模板方法，子类也必须实现所有的抽象方法。而回调就更加灵活，我们只需要往用到的模板方法中注入回调对象即可。</u>
+
+##### 应用举例 addShutdownHook()
+
+Hook 可以翻译成“钩子”，那它跟 Callback 有什么区别呢？
+
+网上有人认为 Hook 就是 Callback，两者说的是一回事儿，只是表达不同而已。Callback 更侧重语法机制的描述，Hook 更加侧重应用场景的描述。
+
+Hook 比较经典的应用场景是 Tomcat 和 JVM 的 shutdown hook。接下来，我们拿 JVM 来举例说明一下。JVM 提供了 Runtime.addShutdownHook(Thread hook) 方法，可以注册一个 JVM 关闭的 Hook。当应用程序关闭的时候，JVM 会自动调用 Hook 代码。代码示例如下所示：
+```java
+
+public class ShutdownHookDemo {
+
+  private static class ShutdownHook extends Thread {
+    public void run() {
+      System.out.println("I am called during shutting down.");
+    }
+  }
+
+  public static void main(String[] args) {
+    Runtime.getRuntime().addShutdownHook(new ShutdownHook());
+  }
+
+}
+```
+
+我们再来看 addShutdownHook() 的代码实现，如下所示。这里我只给出了部分相关代码。
+```java
+
+public class Runtime {
+  public void addShutdownHook(Thread hook) {
+    SecurityManager sm = System.getSecurityManager();
+    if (sm != null) {
+      sm.checkPermission(new RuntimePermission("shutdownHooks"));
+    }
+    ApplicationShutdownHooks.add(hook);
+  }
+}
+
+class ApplicationShutdownHooks {
+    /* The set of registered hooks */
+    private static IdentityHashMap<Thread, Thread> hooks;
+    static {
+            hooks = new IdentityHashMap<>();
+        } catch (IllegalStateException e) {
+            hooks = null;
+        }
+    }
+
+    static synchronized void add(Thread hook) {
+        if(hooks == null)
+            throw new IllegalStateException("Shutdown in progress");
+
+        if (hook.isAlive())
+            throw new IllegalArgumentException("Hook already running");
+
+        if (hooks.containsKey(hook))
+            throw new IllegalArgumentException("Hook previously registered");
+
+        hooks.put(hook, hook);
+    }
+
+    static void runHooks() {
+        Collection<Thread> threads;
+        synchronized(ApplicationShutdownHooks.class) {
+            threads = hooks.keySet();
+            hooks = null;
+        }
+
+        for (Thread hook : threads) {
+            hook.start();
+        }
+        for (Thread hook : threads) {
+            while (true) {
+                try {
+                    hook.join();
+                    break;
+                } catch (InterruptedException ignored) {
+                }
+            }
+        }
+    }
+}
+```
+从代码中我们可以发现，有关 Hook 的逻辑都被封装到 ApplicationShutdownHooks 类中了。当应用程序关闭的时候，JVM 会调用这个类的 runHooks() 方法，创建多个线程，并发地执行多个 Hook。我们在注册完 Hook 之后，并不需要等待 Hook 执行完成，所以，这也算是一种异步回调。
