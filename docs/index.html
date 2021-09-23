@@ -16,20 +16,13 @@
       name: 'docs',
       repo: '',
       maxLevel: 3,
-      homepage: 'home.md',
       search: 'auto',
       search: {
         placeholder: '搜索',
         hideOtherSidebarContent: true,
       },
-      markdown: {
-        smartypants: true,
-        renderer: {
-          link: function() {
-            // ...
-          }
-        }
-      },
+      loadSidebar: true,
+      subMaxLevel: 3,
       count:{
         countable:true,
         fontsize:'0.9em',
