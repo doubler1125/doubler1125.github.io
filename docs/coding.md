@@ -4393,3 +4393,508 @@ class ApplicationShutdownHooks {
 }
 ```
 从代码中我们可以发现，有关 Hook 的逻辑都被封装到 ApplicationShutdownHooks 类中了。当应用程序关闭的时候，JVM 会调用这个类的 runHooks() 方法，创建多个线程，并发地执行多个 Hook。我们在注册完 Hook 之后，并不需要等待 Hook 执行完成，所以，这也算是一种异步回调。
+
+### 策略模式
+
+#### 1.策略模式的原理与实现
+
+> 定义一族算法类，将每个算法分别封装起来，让它们可以互相替换。策略模式可以使算法的变化独立于使用它们的客户端（这里的客户端代指使用算法的代码）。
+
+工厂模式是解耦对象的创建和使用，观察者模式是解耦观察者和被观察者。策略模式跟两者类似，也能起到解耦的作用，不过，它解耦的是策略的定义、创建、使用这三部分。接下来，我就详细讲讲一个完整的策略模式应该包含的这三个部分。
+
+- **1. 策略的定义**
+
+策略类的定义比较简单，包含一个策略接口和一组实现这个接口的策略类。因为所有的策略类都实现相同的接口，所以，<u>客户端代码基于接口而非实现编程，可以灵活地替换不同的策略。</u>示例代码如下所示：
+```java
+
+public interface Strategy {
+  void algorithmInterface();
+}
+
+public class ConcreteStrategyA implements Strategy {
+  @Override
+  public void  algorithmInterface() {
+    //具体的算法...
+  }
+}
+
+public class ConcreteStrategyB implements Strategy {
+  @Override
+  public void  algorithmInterface() {
+    //具体的算法...
+  }
+}
+```
+- **2. 策略的创建**
+
+因为策略模式会包含一组策略，在使用它们的时候，一般会通过类型（type）来判断创建哪个策略来使用。<u>为了封装创建逻辑，我们需要对客户端代码屏蔽创建细节。我们可以把根据 type 创建策略的逻辑抽离出来，放到工厂类中。</u>示例代码如下所示：
+```java
+
+public class StrategyFactory {
+  private static final Map<String, Strategy> strategies = new HashMap<>();
+
+  static {
+    strategies.put("A", new ConcreteStrategyA());
+    strategies.put("B", new ConcreteStrategyB());
+  }
+
+  public static Strategy getStrategy(String type) {
+    if (type == null || type.isEmpty()) {
+      throw new IllegalArgumentException("type should not be empty.");
+    }
+    return strategies.get(type);
+  }
+}
+```
+一般来讲，如果策略类是无状态的，不包含成员变量，只是纯粹的算法实现，这样的策略对象是可以被共享使用的，不需要在每次调用 getStrategy() 的时候，都创建一个新的策略对象。针对这种情况，我们可以使用上面这种工厂类的实现方式，事先创建好每个策略对象，缓存到工厂类中，用的时候直接返回。
+
+相反，如果策略类是有状态的，根据业务场景的需要，我们希望每次从工厂方法中，获得的都是新创建的策略对象，而不是缓存好可共享的策略对象，那我们就需要按照如下方式来实现策略工厂类。
+```java
+
+public class StrategyFactory {
+  public static Strategy getStrategy(String type) {
+    if (type == null || type.isEmpty()) {
+      throw new IllegalArgumentException("type should not be empty.");
+    }
+
+    if (type.equals("A")) {
+      return new ConcreteStrategyA();
+    } else if (type.equals("B")) {
+      return new ConcreteStrategyB();
+    }
+
+    return null;
+  }
+}
+```
+- **3. 策略的使用**
+
+我们知道，策略模式包含一组可选策略，客户端代码一般如何确定使用哪个策略呢？<u>最常见的是运行时动态确定使用哪种策略，这也是策略模式最典型的应用场景。</u>
+
+<u>这里的“运行时动态”指的是，我们事先并不知道会使用哪个策略，而是在程序运行期间，根据配置、用户输入、计算结果等这些不确定因素，动态决定使用哪种策略。</u>接下来，我们通过一个例子来解释一下。
+
+```java
+
+// 策略接口：EvictionStrategy
+// 策略类：LruEvictionStrategy、FifoEvictionStrategy、LfuEvictionStrategy...
+// 策略工厂：EvictionStrategyFactory
+
+public class UserCache {
+  private Map<String, User> cacheData = new HashMap<>();
+  private EvictionStrategy eviction;
+
+  public UserCache(EvictionStrategy eviction) {
+    this.eviction = eviction;
+  }
+
+  //...
+}
+
+// 运行时动态确定，根据配置文件的配置决定使用哪种策略
+public class Application {
+  public static void main(String[] args) throws Exception {
+    EvictionStrategy evictionStrategy = null;
+    Properties props = new Properties();
+    props.load(new FileInputStream("./config.properties"));
+    String type = props.getProperty("eviction_type");
+    evictionStrategy = EvictionStrategyFactory.getEvictionStrategy(type);
+    UserCache userCache = new UserCache(evictionStrategy);
+    //...
+  }
+}
+
+// 非运行时动态确定，在代码中指定使用哪种策略
+public class Application {
+  public static void main(String[] args) {
+    //...
+    EvictionStrategy evictionStrategy = new LruEvictionStrategy();
+    UserCache userCache = new UserCache(evictionStrategy);
+    //...
+  }
+}
+```
+从上面的代码中，我们也可以看出，“非运行时动态确定”，也就是第二个 Application 中的使用方式，并不能发挥策略模式的优势。在这种应用场景下，策略模式实际上退化成了“面向对象的多态特性”或“基于接口而非实现编程原则”。
+
+!> 如何利用策略模式避免分支判断？
+
+实际上，能够移除分支判断逻辑的模式不仅仅有策略模式，后面我们要讲的状态模式也可以。对于使用哪种模式，具体还要看应用场景来定。 <u>策略模式适用于根据不同类型的动态，决定使用哪种策略这样一种应用场景。</u>
+
+我们先通过一个例子来看下，if-else 或 switch-case 分支判断逻辑是如何产生的。具体的代码如下所示。在这个例子中，我们没有使用策略模式，而是将策略的定义、创建、使用直接耦合在一起。
+```java
+
+public class OrderService {
+  public double discount(Order order) {
+    double discount = 0.0;
+    OrderType type = order.getType();
+    if (type.equals(OrderType.NORMAL)) { // 普通订单
+      //...省略折扣计算算法代码
+    } else if (type.equals(OrderType.GROUPON)) { // 团购订单
+      //...省略折扣计算算法代码
+    } else if (type.equals(OrderType.PROMOTION)) { // 促销订单
+      //...省略折扣计算算法代码
+    }
+    return discount;
+  }
+}
+```
+如何来移除掉分支判断逻辑呢？那策略模式就派上用场了。我们使用策略模式对上面的代码重构，将不同类型订单的打折策略设计成策略类，并由工厂类来负责创建策略对象。具体的代码如下所示：
+```java
+
+// 策略的定义
+public interface DiscountStrategy {
+  double calDiscount(Order order);
+}
+// 省略NormalDiscountStrategy、GrouponDiscountStrategy、PromotionDiscountStrategy类代码...
+
+// 策略的创建
+public class DiscountStrategyFactory {
+  private static final Map<OrderType, DiscountStrategy> strategies = new HashMap<>();
+
+  static {
+    strategies.put(OrderType.NORMAL, new NormalDiscountStrategy());
+    strategies.put(OrderType.GROUPON, new GrouponDiscountStrategy());
+    strategies.put(OrderType.PROMOTION, new PromotionDiscountStrategy());
+  }
+
+  public static DiscountStrategy getDiscountStrategy(OrderType type) {
+    return strategies.get(type);
+  }
+}
+
+// 策略的使用
+public class OrderService {
+  public double discount(Order order) {
+    OrderType type = order.getType();
+    DiscountStrategy discountStrategy = DiscountStrategyFactory.getDiscountStrategy(type);
+    return discountStrategy.calDiscount(order);
+  }
+}
+```
+<u>重构之后的代码就没有了 if-else 分支判断语句了。实际上，这得益于策略工厂类。在工厂类中，我们用 Map 来缓存策略，根据 type 直接从 Map 中获取对应的策略，从而避免 if-else 分支判断逻辑。等后面讲到使用状态模式来避免分支判断逻辑的时候，你会发现，它们使用的是同样的套路。本质上都是借助“查表法”，根据 type 查表（代码中的 strategies 就是表）替代根据 type 分支判断。</u>
+
+但是，如果业务场景需要每次都创建不同的策略对象，我们就要用另外一种工厂类的实现方式了。具体的代码如下所示：
+```java
+
+public class DiscountStrategyFactory {
+  public static DiscountStrategy getDiscountStrategy(OrderType type) {
+    if (type == null) {
+      throw new IllegalArgumentException("Type should not be null.");
+    }
+    if (type.equals(OrderType.NORMAL)) {
+      return new NormalDiscountStrategy();
+    } else if (type.equals(OrderType.GROUPON)) {
+      return new GrouponDiscountStrategy();
+    } else if (type.equals(OrderType.PROMOTION)) {
+      return new PromotionDiscountStrategy();
+    }
+    return null;
+  }
+}
+```
+<u>这种实现方式相当于把原来的 if-else 分支逻辑，从 OrderService 类中转移到了工厂类中，实际上并没有真正将它移除。</u>
+
+#### 2.策略模式“给文件排序”实例运用
+
+**问题与解决思路**
+
+假设有这样一个需求，希望写一个小程序，实现对一个文件进行排序的功能。文件中只包含整型数，并且，相邻的数字通过逗号来区隔。如果由你来编写这样一个小程序，你会如何来实现呢？你可以把它当作面试题，先自己思考一下，再来看我下面的讲解。
+
+你可能会说，这不是很简单嘛，只需要将文件中的内容读取出来，并且通过逗号分割成一个一个的数字，放到内存数组中，然后编写某种排序算法（比如快排），或者直接使用编程语言提供的排序函数，对数组进行排序，最后再将数组中的数据写入文件就可以了。
+
+但是，如果文件很大呢？比如有 10GB 大小，因为内存有限（比如只有 8GB 大小），我们没办法一次性加载文件中的所有数据到内存中，这个时候，我们就要利用外部排序算法（具体怎么做，可以参看我的另一个专栏《数据结构与算法之美》中的“排序”相关章节）了。
+
+如果文件更大，比如有 100GB 大小，我们为了利用 CPU 多核的优势，可以在外部排序的基础之上进行优化，加入多线程并发排序的功能，这就有点类似“单机版”的 MapReduce。
+
+如果文件非常大，比如有 1TB 大小，即便是单机多线程排序，这也算很慢了。这个时候，我们可以使用真正的 MapReduce 框架，利用多机的处理能力，提高排序的效率。
+
+**代码实现与分析**
+
+先用最简单直接的方式将它实现出来。
+```java
+
+public class Sorter {
+  private static final long GB = 1000 * 1000 * 1000;
+
+  public void sortFile(String filePath) {
+    // 省略校验逻辑
+    File file = new File(filePath);
+    long fileSize = file.length();
+    if (fileSize < 6 * GB) { // [0, 6GB)
+      quickSort(filePath);
+    } else if (fileSize < 10 * GB) { // [6GB, 10GB)
+      externalSort(filePath);
+    } else if (fileSize < 100 * GB) { // [10GB, 100GB)
+      concurrentExternalSort(filePath);
+    } else { // [100GB, ~)
+      mapreduceSort(filePath);
+    }
+  }
+
+  private void quickSort(String filePath) {
+    // 快速排序
+  }
+
+  private void externalSort(String filePath) {
+    // 外部排序
+  }
+
+  private void concurrentExternalSort(String filePath) {
+    // 多线程外部排序
+  }
+
+  private void mapreduceSort(String filePath) {
+    // 利用MapReduce多机排序
+  }
+}
+
+public class SortingTool {
+  public static void main(String[] args) {
+    Sorter sorter = new Sorter();
+    sorter.sortFile(args[0]);
+  }
+}
+```
+如果只是开发一个简单的工具，那上面的代码实现就足够了。毕竟，代码不多，后续修改、扩展的需求也不多，怎么写都不会导致代码不可维护。但是，如果我们是在开发一个大型项目，排序文件只是其中的一个功能模块，那我们就要在代码设计、代码质量上下点儿功夫了。只有每个小的功能模块都写好，整个项目的代码才能不差。
+
+**代码优化与重构**
+
+针对上面的问题，即便我们想不到该用什么设计模式来重构，也应该能知道该如何解决，那就是将 Sorter 类中的某些代码拆分出来，独立成职责更加单一的小类。实际上，拆分是应对类或者函数代码过多、应对代码复杂性的一个常用手段。
+```java
+
+public interface ISortAlg {
+  void sort(String filePath);
+}
+
+public class QuickSort implements ISortAlg {
+  @Override
+  public void sort(String filePath) {
+    //...
+  }
+}
+
+public class ExternalSort implements ISortAlg {
+  @Override
+  public void sort(String filePath) {
+    //...
+  }
+}
+
+public class ConcurrentExternalSort implements ISortAlg {
+  @Override
+  public void sort(String filePath) {
+    //...
+  }
+}
+
+public class MapReduceSort implements ISortAlg {
+  @Override
+  public void sort(String filePath) {
+    //...
+  }
+}
+
+public class Sorter {
+  private static final long GB = 1000 * 1000 * 1000;
+
+  public void sortFile(String filePath) {
+    // 省略校验逻辑
+    File file = new File(filePath);
+    long fileSize = file.length();
+    ISortAlg sortAlg;
+    if (fileSize < 6 * GB) { // [0, 6GB)
+      sortAlg = new QuickSort();
+    } else if (fileSize < 10 * GB) { // [6GB, 10GB)
+      sortAlg = new ExternalSort();
+    } else if (fileSize < 100 * GB) { // [10GB, 100GB)
+      sortAlg = new ConcurrentExternalSort();
+    } else { // [100GB, ~)
+      sortAlg = new MapReduceSort();
+    }
+    sortAlg.sort(filePath);
+  }
+}
+```
+<u>除此之外，我们将排序算法设计成独立的类，跟具体的业务逻辑（代码中的 if-else 那部分逻辑）解耦，也让排序算法能够复用。这一步实际上就是策略模式的第一步，也就是将策略的定义分离出来。</u>
+
+实际上，上面的代码还可以继续优化。每种排序类都是无状态的，我们没必要在每次使用的时候，都重新创建一个新的对象。所以，我们可以使用工厂模式对对象的创建进行封装。按照这个思路，我们对代码进行重构。重构之后的代码如下所示：
+```java
+
+public class SortAlgFactory {
+  private static final Map<String, ISortAlg> algs = new HashMap<>();
+
+  static {
+    algs.put("QuickSort", new QuickSort());
+    algs.put("ExternalSort", new ExternalSort());
+    algs.put("ConcurrentExternalSort", new ConcurrentExternalSort());
+    algs.put("MapReduceSort", new MapReduceSort());
+  }
+
+  public static ISortAlg getSortAlg(String type) {
+    if (type == null || type.isEmpty()) {
+      throw new IllegalArgumentException("type should not be empty.");
+    }
+    return algs.get(type);
+  }
+}
+
+public class Sorter {
+  private static final long GB = 1000 * 1000 * 1000;
+
+  public void sortFile(String filePath) {
+    // 省略校验逻辑
+    File file = new File(filePath);
+    long fileSize = file.length();
+    ISortAlg sortAlg;
+    if (fileSize < 6 * GB) { // [0, 6GB)
+      sortAlg = SortAlgFactory.getSortAlg("QuickSort");
+    } else if (fileSize < 10 * GB) { // [6GB, 10GB)
+      sortAlg = SortAlgFactory.getSortAlg("ExternalSort");
+    } else if (fileSize < 100 * GB) { // [10GB, 100GB)
+      sortAlg = SortAlgFactory.getSortAlg("ConcurrentExternalSort");
+    } else { // [100GB, ~)
+      sortAlg = SortAlgFactory.getSortAlg("MapReduceSort");
+    }
+    sortAlg.sort(filePath);
+  }
+}
+```
+经过上面两次重构之后，现在的代码实际上已经符合策略模式的代码结构了。我们通过策略模式将策略的定义、创建、使用解耦，让每一部分都不至于太复杂。不过，Sorter 类中的 sortFile() 函数还是有一堆 if-else 逻辑。这里的 if-else 逻辑分支不多、也不复杂，这样写完全没问题。
+
+但如果你特别想将 if-else 分支判断移除掉，那也是有办法的。实际上，这也是基于查表法来解决的，其中的“algs”就是“表”。
+```java
+
+public class Sorter {
+  private static final long GB = 1000 * 1000 * 1000;
+  private static final List<AlgRange> algs = new ArrayList<>();
+  static {
+    algs.add(new AlgRange(0, 6*GB, SortAlgFactory.getSortAlg("QuickSort")));
+    algs.add(new AlgRange(6*GB, 10*GB, SortAlgFactory.getSortAlg("ExternalSort")));
+    algs.add(new AlgRange(10*GB, 100*GB, SortAlgFactory.getSortAlg("ConcurrentExternalSort")));
+    algs.add(new AlgRange(100*GB, Long.MAX_VALUE, SortAlgFactory.getSortAlg("MapReduceSort")));
+  }
+
+  public void sortFile(String filePath) {
+    // 省略校验逻辑
+    File file = new File(filePath);
+    long fileSize = file.length();
+    ISortAlg sortAlg = null;
+    for (AlgRange algRange : algs) {
+      if (algRange.inRange(fileSize)) {
+        sortAlg = algRange.getAlg();
+        break;
+      }
+    }
+    sortAlg.sort(filePath);
+  }
+
+  private static class AlgRange {
+    private long start;
+    private long end;
+    private ISortAlg alg;
+
+    public AlgRange(long start, long end, ISortAlg alg) {
+      this.start = start;
+      this.end = end;
+      this.alg = alg;
+    }
+
+    public ISortAlg getAlg() {
+      return alg;
+    }
+
+    public boolean inRange(long size) {
+      return size >= start && size < end;
+    }
+  }
+}
+```
+现在的代码实现就更加优美了。我们把可变的部分隔离到了策略工厂类和 Sorter 类中的静态代码段中。当要添加一个新的排序算法时，我们只需要修改策略工厂类和 Sort 类中的静态代码段，其他代码都不需要修改，这样就将代码改动最小化、集中化了。
+
+你可能会说，即便这样，当我们添加新的排序算法的时候，还是需要修改代码，并不完全符合开闭原则。有什么办法让我们完全满足开闭原则呢？对于 Java 语言来说，我们可以通过反射来避免对策略工厂类的修改。具体是这么做的：我们通过一个配置文件或者自定义的 annotation 来标注都有哪些策略类；策略工厂类读取配置文件或者搜索被 annotation 标注的策略类，然后通过反射动态地加载这些策略类、创建策略对象；当我们新添加一个策略的时候，只需要将这个新添加的策略类添加到配置文件或者用 annotation 标注即可。还记得上一节课的课堂讨论题吗？我们也可以用这种方法来解决。
+
+对于 Sorter 来说，我们可以通过同样的方法来避免修改。我们通过将文件大小区间和算法之间的对应关系放到配置文件中。当添加新的排序算法时，我们只需要改动配置文件即可，不需要改动代码。
+
+### 职责链模式
+
+我们学习了模板模式、策略模式，今天，我们来学习职责链模式。这三种模式具有相同的作用：复用和扩展，在实际的项目开发中比较常用，特别是框架开发中，我们可以利用它们来提供框架的扩展点，能够让框架的使用者在不修改框架源码的情况下，基于扩展点定制化框架的功能。
+
+#### 1.职责链模式的原理和实现
+
+> 将请求的发送和接收解耦，让多个接收对象都有机会处理这个请求。将这些接收对象串成一条链，并沿着这条链传递这个请求，直到链上的某个接收对象能够处理它为止。
+
+<u>在职责链模式中，多个处理器（也就是刚刚定义中说的“接收对象”）依次处理同一个请求。一个请求先经过 A 处理器处理，然后再把请求传递给 B 处理器，B 处理器处理完后再传递给 C 处理器，以此类推，形成一个链条。链条上的每个处理器各自承担各自的处理职责，所以叫作职责链模式。</u>
+
+职责链模式有多种实现方式，我们这里介绍两种比较常用的。
+
+第一种实现方式如下所示。<u>其中，Handler 是所有处理器类的抽象父类，handle() 是抽象方法。每个具体的处理器类（HandlerA、HandlerB）的 handle() 函数的代码结构类似，如果它能处理该请求，就不继续往下传递；如果不能处理，则交由后面的处理器来处理（也就是调用 successor.handle()）。HandlerChain 是处理器链，从数据结构的角度来看，它就是一个记录了链头、链尾的链表。其中，记录链尾是为了方便添加处理器。</u>
+```java
+
+public abstract class Handler {
+  protected Handler successor = null;
+
+  public void setSuccessor(Handler successor) {
+    this.successor = successor;
+  }
+
+  public final void handle() {
+    boolean handled = doHandle();
+    if (successor != null && !handled) {
+      successor.handle();
+    }
+  }
+
+  protected abstract boolean doHandle();
+}
+
+public class HandlerA extends Handler {
+  @Override
+  protected boolean doHandle() {
+    boolean handled = false;
+    //...
+    return handled;
+  }
+}
+
+public class HandlerB extends Handler {
+  @Override
+  protected boolean doHandle() {
+    boolean handled = false;
+    //...
+    return handled;
+  }
+}
+
+public class HandlerChain {
+  private Handler head = null;
+  private Handler tail = null;
+
+  public void addHandler(Handler handler) {
+    handler.setSuccessor(null);
+
+    if (head == null) {
+      head = handler;
+      tail = handler;
+      return;
+    }
+
+    tail.setSuccessor(handler);
+    tail = handler;
+  }
+
+  public void handle() {
+    if (head != null) {
+      head.handle();
+    }
+  }
+}
+
+// 使用举例
+public class Application {
+  public static void main(String[] args) {
+    HandlerChain chain = new HandlerChain();
+    chain.addHandler(new HandlerA());
+    chain.addHandler(new HandlerB());
+    chain.handle();
+  }
+}
+```
