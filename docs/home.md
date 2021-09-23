@@ -1,6 +1,5 @@
 [doubler1125]:https://github.com/doubler1125/doubler1125.github.io/blob/main/docs/_images/
 # 编写高质量代码
-![编写高质量代码](_images/1-1.jpg '编写高质量代码')
 
 [doubler1125]/1-1.jpg
 ## 设计原则与思想：面向对象
