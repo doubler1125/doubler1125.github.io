@@ -5069,3 +5069,241 @@ public class ApplicationDemo {
 
 ### 状态模式
 
+状态模式是状态机的一种实现方式.
+
+针对状态机，有三种实现方式:
+- 第一种实现方式叫分支逻辑法。利用 if-else 或者 switch-case 分支逻辑，参照状态转移图，将每一个状态转移原模原样地直译成代码。对于简单的状态机来说，这种实现方式最简单、最直接，是首选。
+- 第二种实现方式叫查表法。对于状态很多、状态转移比较复杂的状态机来说，查表法比较合适。通过二维数组来表示状态转移图，能极大地提高代码的可读性和可维护性。
+- 第三种实现方式叫状态模式。对于状态并不多、状态转移也比较简单，但事件触发执行的动作包含的业务逻辑可能比较复杂的状态机来说，我们首选这种实现方式。
+
+#### 1.什么是有限状态机？
+
+> 有限状态机，英文翻译是 Finite State Machine，缩写为 FSM，简称为状态机。状态机有 3 个组成部分：状态（State）、事件（Event）、动作（Action）。其中，事件也称为转移条件（Transition Condition）。事件触发状态的转移及动作的执行。不过，动作不是必须的，也可能只转移状态，不执行任何动作。
+
+#### 2.状态机运用举例
+
+超级马里奥”游戏不知道你玩过没有？在游戏中，马里奥可以变身为多种形态，比如小马里奥（Small Mario）、超级马里奥（Super Mario）、火焰马里奥（Fire Mario）、斗篷马里奥（Cape Mario）等等。在不同的游戏情节下，各个形态会互相转化，并相应的增减积分。比如，初始形态是小马里奥，吃了蘑菇之后就会变成超级马里奥，并且增加 100 积分。
+
+实际上，马里奥形态的转变就是一个状态机。其中，马里奥的不同形态就是状态机中的“状态”，游戏情节（比如吃了蘑菇）就是状态机中的“事件”，加减积分就是状态机中的“动作”。比如，吃蘑菇这个事件，会触发状态的转移：从小马里奥转移到超级马里奥，以及触发动作的执行（增加 100 积分）。
+
+简化之后的状态转移如下图所示：
+![](_images/2-10.jpg)
+如下所示。其中，obtainMushRoom()、obtainCape()、obtainFireFlower()、meetMonster() 这几个函数对应E1到E4四个事件，能够根据当前的状态和事件，更新状态和增减积分。
+```java
+
+public enum State {
+  SMALL(0),
+  SUPER(1),
+  FIRE(2),
+  CAPE(3);
+
+  private int value;
+
+  private State(int value) {
+    this.value = value;
+  }
+
+  public int getValue() {
+    return this.value;
+  }
+}
+
+// 马里奥状态机
+public class MarioStateMachine {
+  private int score;
+  private State currentState;
+
+  public MarioStateMachine() {
+    this.score = 0;
+    this.currentState = State.SMALL;
+  }
+
+  public void obtainMushRoom() {
+    //TODO
+  }
+
+  public void obtainCape() {
+    //TODO
+  }
+
+  public void obtainFireFlower() {
+    //TODO
+  }
+
+  public void meetMonster() {
+    //TODO
+  }
+
+  public int getScore() {
+    return this.score;
+  }
+
+  public State getCurrentState() {
+    return this.currentState;
+  }
+}
+
+public class ApplicationDemo {
+  public static void main(String[] args) {
+    MarioStateMachine mario = new MarioStateMachine();
+    mario.obtainMushRoom();
+    int score = mario.getScore();
+    State state = mario.getCurrentState();
+    System.out.println("mario score: " + score + "; state: " + state);
+  }
+}
+```
+##### 状态机实现方式一：分支逻辑法
+
+参照状态转移图，将每一个状态转移，原模原样地直译成代码。
+```java
+
+public class MarioStateMachine {
+  private int score;
+  private State currentState;
+
+  public MarioStateMachine() {
+    this.score = 0;
+    this.currentState = State.SMALL;
+  }
+
+  public void obtainMushRoom() {
+    if (currentState.equals(State.SMALL)) {
+      this.currentState = State.SUPER;
+      this.score += 100;
+    }
+  }
+
+  public void obtainCape() {
+    if (currentState.equals(State.SMALL) || currentState.equals(State.SUPER) ) {
+      this.currentState = State.CAPE;
+      this.score += 200;
+    }
+  }
+
+  public void obtainFireFlower() {
+    if (currentState.equals(State.SMALL) || currentState.equals(State.SUPER) ) {
+      this.currentState = State.FIRE;
+      this.score += 300;
+    }
+  }
+
+  public void meetMonster() {
+    if (currentState.equals(State.SUPER)) {
+      this.currentState = State.SMALL;
+      this.score -= 100;
+      return;
+    }
+
+    if (currentState.equals(State.CAPE)) {
+      this.currentState = State.SMALL;
+      this.score -= 200;
+      return;
+    }
+
+    if (currentState.equals(State.FIRE)) {
+      this.currentState = State.SMALL;
+      this.score -= 300;
+      return;
+    }
+  }
+
+  public int getScore() {
+    return this.score;
+  }
+
+  public State getCurrentState() {
+    return this.currentState;
+  }
+}
+```
+对于简单的状态机来说，分支逻辑这种实现方式是可以接受的。但是，对于复杂的状态机来说，这种实现方式极易漏写或者错写某个状态转移。除此之外，代码中充斥着大量的 if-else 或者 switch-case 分支判断逻辑，可读性和可维护性都很差。
+
+##### 状态机实现方式二：查表法
+
+实际上，除了用状态转移图来表示之外，状态机还可以用二维表来表示，如下所示。<u>在这个二维表中，第一维表示当前状态，第二维表示事件，值表示当前状态经过事件之后，转移到的新状态及其执行的动作。</u>
+![](_images/2-11.jpg)
+当修改状态机时，我们只需要修改 transitionTable 和 actionTable 两个二维数组即可。实际上，如果我们把这两个二维数组存储在配置文件中，当需要修改状态机时，我们甚至可以不修改任何代码，只需要修改配置文件就可以了。具体的代码如下所示：
+```java
+
+public enum Event {
+  GOT_MUSHROOM(0),
+  GOT_CAPE(1),
+  GOT_FIRE(2),
+  MET_MONSTER(3);
+
+  private int value;
+
+  private Event(int value) {
+    this.value = value;
+  }
+
+  public int getValue() {
+    return this.value;
+  }
+}
+
+public class MarioStateMachine {
+  private int score;
+  private State currentState;
+
+  private static final State[][] transitionTable = {
+          {SUPER, CAPE, FIRE, SMALL},
+          {SUPER, CAPE, FIRE, SMALL},
+          {CAPE, CAPE, CAPE, SMALL},
+          {FIRE, FIRE, FIRE, SMALL}
+  };
+
+  private static final int[][] actionTable = {
+          {+100, +200, +300, +0},
+          {+0, +200, +300, -100},
+          {+0, +0, +0, -200},
+          {+0, +0, +0, -300}
+  };
+
+  public MarioStateMachine() {
+    this.score = 0;
+    this.currentState = State.SMALL;
+  }
+
+  public void obtainMushRoom() {
+    executeEvent(Event.GOT_MUSHROOM);
+  }
+
+  public void obtainCape() {
+    executeEvent(Event.GOT_CAPE);
+  }
+
+  public void obtainFireFlower() {
+    executeEvent(Event.GOT_FIRE);
+  }
+
+  public void meetMonster() {
+    executeEvent(Event.MET_MONSTER);
+  }
+
+  private void executeEvent(Event event) {
+    int stateValue = currentState.getValue();
+    int eventValue = event.getValue();
+    this.currentState = transitionTable[stateValue][eventValue];
+    this.score += actionTable[stateValue][eventValue];
+  }
+
+  public int getScore() {
+    return this.score;
+  }
+
+  public State getCurrentState() {
+    return this.currentState;
+  }
+
+}
+```
+##### 状态机实现方式三：状态模式
+
+在查表法的代码实现中，事件触发的动作只是简单的积分加减，所以，我们用一个 int 类型的二维数组 actionTable 就能表示，二维数组中的值表示积分的加减值。但是，如果要执行的动作并非这么简单，而是一系列复杂的逻辑操作（比如加减积分、写数据库，还有可能发送消息通知等等），我们就没法用如此简单的二维数组来表示了。这也就是说，查表法的实现方式有一定局限性。
+
+<u>状态模式通过将事件触发的状态转移和动作执行，拆分到不同的状态类中，来避免分支判断逻辑。</u>
+
+
+
