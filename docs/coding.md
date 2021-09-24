@@ -2928,9 +2928,59 @@ while (bin.read(data) != -1) {
 
 **基于装饰器模式的设计方案**
 
-针对刚刚的继承结构过于复杂的问题，我们可以通过将继承关系改为组合关系来解决。
 ```java
 针对刚刚的继承结构过于复杂的问题，我们可以通过将继承关系改为组合关系来解决。
+
+public abstract class InputStream {
+  //...
+  public int read(byte b[]) throws IOException {
+    return read(b, 0, b.length);
+  }
+  
+  public int read(byte b[], int off, int len) throws IOException {
+    //...
+  }
+  
+  public long skip(long n) throws IOException {
+    //...
+  }
+
+  public int available() throws IOException {
+    return 0;
+  }
+  
+  public void close() throws IOException {}
+
+  public synchronized void mark(int readlimit) {}
+    
+  public synchronized void reset() throws IOException {
+    throw new IOException("mark/reset not supported");
+  }
+
+  public boolean markSupported() {
+    return false;
+  }
+}
+
+public class BufferedInputStream extends InputStream {
+  protected volatile InputStream in;
+
+  protected BufferedInputStream(InputStream in) {
+    this.in = in;
+  }
+  
+  //...实现基于缓存的读数据接口...  
+}
+
+public class DataInputStream extends InputStream {
+  protected volatile InputStream in;
+
+  protected DataInputStream(InputStream in) {
+    this.in = in;
+  }
+  
+  //...实现读取基本类型数据的接口
+}
 ```
 看了上面的代码，你可能会问，那装饰器模式就是简单的“用组合替代继承”吗？当然不是。从 Java IO 的设计来看，装饰器模式相对于简单的组合关系，还有两个比较特殊的地方:
 
@@ -4826,7 +4876,9 @@ public class Sorter {
 
 职责链模式有多种实现方式，我们这里介绍两种比较常用的。
 
-第一种实现方式如下所示。<u>其中，Handler 是所有处理器类的抽象父类，handle() 是抽象方法。每个具体的处理器类（HandlerA、HandlerB）的 handle() 函数的代码结构类似，如果它能处理该请求，就不继续往下传递；如果不能处理，则交由后面的处理器来处理（也就是调用 successor.handle()）。HandlerChain 是处理器链，从数据结构的角度来看，它就是一个记录了链头、链尾的链表。其中，记录链尾是为了方便添加处理器。</u>
+第一种实现方式如下所示。
+
+<u>其中，Handler 是所有处理器类的抽象父类，handle() 是抽象方法。每个具体的处理器类（HandlerA、HandlerB）的 handle() 函数的代码结构类似，如果它能处理该请求，就不继续往下传递；如果不能处理，则交由后面的处理器来处理（也就是调用 successor.handle()）。HandlerChain 是处理器链，从数据结构的角度来看，它就是一个记录了链头、链尾的链表。其中，记录链尾是为了方便添加处理器。</u>
 ```java
 
 public abstract class Handler {
@@ -4898,3 +4950,122 @@ public class Application {
   }
 }
 ```
+我们再来看第二种实现方式，代码如下所示。
+
+这种实现方式更加简单。HandlerChain 类用数组而非链表来保存所有的处理器，并且需要在 HandlerChain 的 handle() 函数中，依次调用每个处理器的 handle() 函数。
+```java
+
+public interface IHandler {
+  boolean handle();
+}
+
+public class HandlerA implements IHandler {
+  @Override
+  public boolean handle() {
+    boolean handled = false;
+    //...
+    return handled;
+  }
+}
+
+public class HandlerB implements IHandler {
+  @Override
+  public boolean handle() {
+    boolean handled = false;
+    //...
+    return handled;
+  }
+}
+
+public class HandlerChain {
+  private List<IHandler> handlers = new ArrayList<>();
+
+  public void addHandler(IHandler handler) {
+    this.handlers.add(handler);
+  }
+
+  public void handle() {
+    for (IHandler handler : handlers) {
+      boolean handled = handler.handle();
+      if (handled) {
+        break;
+      }
+    }
+  }
+}
+
+// 使用举例
+public class Application {
+  public static void main(String[] args) {
+    HandlerChain chain = new HandlerChain();
+    chain.addHandler(new HandlerA());
+    chain.addHandler(new HandlerB());
+    chain.handle();
+  }
+}
+```
+在 GoF 给出的定义中，如果处理器链上的某个处理器能够处理这个请求，那就不会继续往下传递请求。<u>实际上，职责链模式还有一种变体，那就是请求会被所有的处理器都处理一遍，不存在中途终止的情况。</u>
+
+#### 2.职责链模式的应用场景举例
+
+对于支持 UGC（User Generated Content，用户生成内容）的应用（比如论坛）来说，用户生成的内容（比如，在论坛中发表的帖子）可能会包含一些敏感词（比如涉黄、广告、反动等词汇）。针对这个应用场景，我们就可以利用职责链模式来过滤这些敏感词。
+
+对于包含敏感词的内容，我们有两种处理方式，一种是直接禁止发布，另一种是给敏感词打马赛克（比如，用 *** 替换敏感词）之后再发布。第一种处理方式符合 GoF 给出的职责链模式的定义，第二种处理方式是职责链模式的变体。
+
+我们这里只给出第一种实现方式的代码示例。
+```java
+
+public interface SensitiveWordFilter {
+  boolean doFilter(Content content);
+}
+
+public class SexyWordFilter implements SensitiveWordFilter {
+  @Override
+  public boolean doFilter(Content content) {
+    boolean legal = true;
+    //...
+    return legal;
+  }
+}
+
+// PoliticalWordFilter、AdsWordFilter类代码结构与SexyWordFilter类似
+
+public class SensitiveWordFilterChain {
+  private List<SensitiveWordFilter> filters = new ArrayList<>();
+
+  public void addFilter(SensitiveWordFilter filter) {
+    this.filters.add(filter);
+  }
+
+  // return true if content doesn't contain sensitive words.
+  public boolean filter(Content content) {
+    for (SensitiveWordFilter filter : filters) {
+      if (!filter.doFilter(content)) {
+        return false;
+      }
+    }
+    return true;
+  }
+}
+
+public class ApplicationDemo {
+  public static void main(String[] args) {
+    SensitiveWordFilterChain filterChain = new SensitiveWordFilterChain();
+    filterChain.addFilter(new AdsWordFilter());
+    filterChain.addFilter(new SexyWordFilter());
+    filterChain.addFilter(new PoliticalWordFilter());
+
+    boolean legal = filterChain.filter(new Content());
+    if (!legal) {
+      // 不发表
+    } else {
+      // 发表
+    }
+  }
+}
+```
+
+<u>职责链模式最常用来开发框架的过滤器和拦截器。</u>
+
+### 状态模式
+
