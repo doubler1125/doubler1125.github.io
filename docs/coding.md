@@ -5305,5 +5305,99 @@ public class MarioStateMachine {
 
 <u>状态模式通过将事件触发的状态转移和动作执行，拆分到不同的状态类中，来避免分支判断逻辑。</u>
 
+其中，IMario 是状态的接口，定义了所有的事件。SmallMario、SuperMario、CapeMario、FireMario 是 IMario 接口的实现类，分别对应状态机中的 4 个状态。原来所有的状态转移和动作执行的代码逻辑，都集中在 MarioStateMachine 类中，现在，这些代码逻辑被分散到了这 4 个状态类中。
+```java
 
+public interface IMario {
+  State getName();
+  void obtainMushRoom(MarioStateMachine stateMachine);
+  void obtainCape(MarioStateMachine stateMachine);
+  void obtainFireFlower(MarioStateMachine stateMachine);
+  void meetMonster(MarioStateMachine stateMachine);
+}
 
+public class SmallMario implements IMario {
+  private static final SmallMario instance = new SmallMario();
+  private SmallMario() {}
+  public static SmallMario getInstance() {
+    return instance;
+  }
+
+  @Override
+  public State getName() {
+    return State.SMALL;
+  }
+
+  @Override
+  public void obtainMushRoom(MarioStateMachine stateMachine) {
+    stateMachine.setCurrentState(SuperMario.getInstance());
+    stateMachine.setScore(stateMachine.getScore() + 100);
+  }
+
+  @Override
+  public void obtainCape(MarioStateMachine stateMachine) {
+    stateMachine.setCurrentState(CapeMario.getInstance());
+    stateMachine.setScore(stateMachine.getScore() + 200);
+  }
+
+  @Override
+  public void obtainFireFlower(MarioStateMachine stateMachine) {
+    stateMachine.setCurrentState(FireMario.getInstance());
+    stateMachine.setScore(stateMachine.getScore() + 300);
+  }
+
+  @Override
+  public void meetMonster(MarioStateMachine stateMachine) {
+    // do nothing...
+  }
+}
+
+// 省略SuperMario、CapeMario、FireMario类...
+
+public class MarioStateMachine {
+  private int score;
+  private IMario currentState;
+
+  public MarioStateMachine() {
+    this.score = 0;
+    this.currentState = SmallMario.getInstance();
+  }
+
+  public void obtainMushRoom() {
+    this.currentState.obtainMushRoom(this);
+  }
+
+  public void obtainCape() {
+    this.currentState.obtainCape(this);
+  }
+
+  public void obtainFireFlower() {
+    this.currentState.obtainFireFlower(this);
+  }
+
+  public void meetMonster() {
+    this.currentState.meetMonster(this);
+  }
+
+  public int getScore() {
+    return this.score;
+  }
+
+  public State getCurrentState() {
+    return this.currentState.getName();
+  }
+
+  public void setScore(int score) {
+    this.score = score;
+  }
+
+  public void setCurrentState(IMario currentState) {
+    this.currentState = currentState;
+  }
+}
+```
+上面的代码是已经优化后的：将状态类设计成单例，毕竟状态类中不包含任何成员变量；不能通过构造函数传递了，通过函数参数将 MarioStateMachine 传递进状态类。
+
+强调其中的一点，即 MarioStateMachine 和各个状态类之间是双向依赖关系。MarioStateMachine 依赖各个状态类是理所当然的，但是，反过来，各个状态类为什么要依赖 MarioStateMachine 呢？这是因为，各个状态类需要更新 MarioStateMachine 中的两个变量，score 和 currentState。
+
+实际上，像游戏这种比较复杂的状态机，包含的状态比较多，我优先推荐使用查表法，而状态模式会引入非常多的状态类，会导致代码比较难维护。相反，像电商下单、外卖下单这种类型的状态机，它们的状态并不多，状态转移也比较简单，但事件触发执行的动作包含的业务逻辑可能会比较复杂，所以，更加推荐使用状态模式来实现。
