@@ -5401,3 +5401,607 @@ public class MarioStateMachine {
 强调其中的一点，即 MarioStateMachine 和各个状态类之间是双向依赖关系。MarioStateMachine 依赖各个状态类是理所当然的，但是，反过来，各个状态类为什么要依赖 MarioStateMachine 呢？这是因为，各个状态类需要更新 MarioStateMachine 中的两个变量，score 和 currentState。
 
 实际上，像游戏这种比较复杂的状态机，包含的状态比较多，我优先推荐使用查表法，而状态模式会引入非常多的状态类，会导致代码比较难维护。相反，像电商下单、外卖下单这种类型的状态机，它们的状态并不多，状态转移也比较简单，但事件触发执行的动作包含的业务逻辑可能会比较复杂，所以，更加推荐使用状态模式来实现。
+
+### 迭代器模式
+
+#### 1.迭代器模式的原理和实现
+
+迭代器模式，也叫游标模式。它用来遍历集合对象。这里说的“集合对象”，我们也可以叫“容器”“聚合对象”，实际上就是包含一组对象的对象，比如，数组、链表、树、图、跳表。
+
+一个完整的迭代器模式，一般会涉及容器和容器迭代器两部分内容。为了达到基于接口而非实现编程的目的，容器又包含容器接口、容器实现类，迭代器又包含迭代器接口、迭代器实现类。容器中需要定义 iterator() 方法，用来创建迭代器。迭代器接口中需要定义 hasNext()、currentItem()、next() 三个最基本的方法。容器对象通过依赖注入传递到迭代器类中。
+```java
+
+// 接口定义方式一
+public interface Iterator<E> {
+  boolean hasNext();
+  void next();
+  E currentItem();
+}
+
+// 接口定义方式二
+public interface Iterator2<E> {
+  boolean hasNext();
+  E next();
+}
+
+// 第一种定义方式更加灵活一些，比如我们可以多次调用 currentItem() 查询当前元素，而不移动游标。所以，在接下来的实现中，我们选择第一种接口定义方式。
+
+public class ArrayIterator<E> implements Iterator<E> {
+  private int cursor;
+  private ArrayList<E> arrayList;
+
+  public ArrayIterator(ArrayList<E> arrayList) {
+    this.cursor = 0;
+    this.arrayList = arrayList;
+  }
+
+  @Override
+  public boolean hasNext() {
+    return cursor != arrayList.size(); //注意这里，cursor在指向最后一个元素的时候，hasNext()仍旧返回true。
+  }
+
+  @Override
+  public void next() {
+    cursor++;
+  }
+
+  @Override
+  public E currentItem() {
+    if (cursor >= arrayList.size()) {
+      throw new NoSuchElementException();
+    }
+    return arrayList.get(cursor);
+  }
+}
+
+public class Demo {
+  public static void main(String[] args) {
+    ArrayList<String> names = new ArrayList<>();
+    names.add("xzg");
+    names.add("wang");
+    names.add("zheng");
+    
+    Iterator<String> iterator = new ArrayIterator(names);
+    while (iterator.hasNext()) {
+      System.out.println(iterator.currentItem());
+      iterator.next();
+    }
+  }
+}
+
+```
+在上面的代码实现中，我们需要将待遍历的容器对象，通过构造函数传递给迭代器类。<u>实际上，为了封装迭代器的创建细节，我们可以在容器中定义一个 iterator() 方法，来创建对应的迭代器。</u>为了能实现基于接口而非实现编程，我们还需要将这个方法定义在 List 接口中。具体的代码实现和使用示例如下所示：
+```java
+
+public interface List<E> {
+  Iterator iterator();
+  //...省略其他接口函数...
+}
+
+public class ArrayList<E> implements List<E> {
+  //...
+  public Iterator iterator() {
+    return new ArrayIterator(this);
+  }
+  //...省略其他代码
+}
+
+public class Demo {
+  public static void main(String[] args) {
+    List<String> names = new ArrayList<>();
+    names.add("xzg");
+    names.add("wang");
+    names.add("zheng");
+    
+    Iterator<String> iterator = names.iterator();
+    while (iterator.hasNext()) {
+      System.out.println(iterator.currentItem());
+      iterator.next();
+    }
+  }
+}
+```
+#### 2.迭代器模式的优势
+
+- 迭代器模式封装集合内部的复杂数据结构，开发者不需要了解如何遍历，直接使用容器提供的迭代器即可；
+- 迭代器模式将集合对象的遍历操作从集合类中拆分出来，放到迭代器类中，让两者的职责更加单一；
+- 迭代器模式让添加新的遍历算法更加容易，更符合开闭原则。除此之外，因为迭代器都实现自相同的接口，在开发中，基于接口而非实现编程，替换迭代器也变得更加容易。
+
+#### 3.遍历集合的同时，为什么不能增删集合元素？
+
+在通过迭代器来遍历集合元素的同时，增加或者删除集合中的元素，有可能会导致某个元素被重复遍历或遍历不到。不过，并不是所有情况下都会遍历出错，有的时候也可以正常遍历，所以，这种行为称为结果不可预期行为或者未决行为。实际上，“不可预期”比直接出错更加可怕，有的时候运行正确，有的时候运行错误，一些隐藏很深、很难 debug 的 bug 就是这么产生的。
+
+有两种比较干脆利索的解决方案，来避免出现这种不可预期的运行结果。一种是遍历的时候不允许增删元素，另一种是增删元素之后让遍历报错。第一种解决方案比较难实现，因为很难确定迭代器使用结束的时间点。第二种解决方案更加合理。Java 语言就是采用的这种解决方案。增删元素之后，我们选择 fail-fast 解决方式，让遍历操作直接抛出运行时异常。
+
+### 访问者模式
+
+今天要讲的访问者模式。它可以算是 23 种经典设计模式中最难理解的几个之一。因为它难理解、难实现，应用它会导致代码的可读性、可维护性变差，所以，访问者模式在实际的软件开发中很少被用到，<u>在没有特别必要的情况下，建议你不要使用访问者模式。</u>
+
+> 允许一个或者多个操作应用到一组对象上，解耦操作和对象本身。
+
+#### 1.访问者模式的原理和实现
+
+访问者模式针对的是一组类型不同的对象（PdfFile、PPTFile、WordFile）。不过，尽管这组对象的类型是不同的，但是，它们继承相同的父类（ResourceFile）或者实现相同的接口。在不同的应用场景下，我们需要对这组对象进行一系列不相关的业务操作（抽取文本、压缩等），但为了避免不断添加功能导致类（PdfFile、PPTFile、WordFile）不断膨胀，职责越来越不单一，以及避免频繁地添加功能导致的频繁代码修改，我们使用访问者模式，将对象与操作解耦，将这些业务操作抽离出来，定义在独立细分的访问者类（Extractor、Compressor）中。
+
+假设我们从网站上爬取了很多资源文件，它们的格式有三种：PDF、PPT、Word。我们现在要开发一个工具来处理这批资源文件。这个工具的其中一个功能是，把这些资源文件中的文本内容抽取出来放到 txt 文件中，还要支持压缩、提取文件元信息（文件名、大小、更新时间等等）构建索引等一系列的功能：
+```java
+
+public abstract class ResourceFile {
+  protected String filePath;
+  public ResourceFile(String filePath) {
+    this.filePath = filePath;
+  }
+  abstract public void accept(Visitor vistor);
+}
+
+public class PdfFile extends ResourceFile {
+  public PdfFile(String filePath) {
+    super(filePath);
+  }
+
+  @Override
+  public void accept(Visitor visitor) {
+    visitor.visit(this);
+  }
+
+  //...
+}
+//...PPTFile、WordFile跟PdfFile类似，这里就省略了...
+
+public interface Visitor {
+  void visit(PdfFile pdfFile);
+  void visit(PPTFile pdfFile);
+  void visit(WordFile pdfFile);
+}
+
+public class Extractor implements Visitor {
+  @Override
+  public void visit(PPTFile pptFile) {
+    //...
+    System.out.println("Extract PPT.");
+  }
+
+  @Override
+  public void visit(PdfFile pdfFile) {
+    //...
+    System.out.println("Extract PDF.");
+  }
+
+  @Override
+  public void visit(WordFile wordFile) {
+    //...
+    System.out.println("Extract WORD.");
+  }
+}
+
+public class Compressor implements Visitor {
+  @Override
+  public void visit(PPTFile pptFile) {
+    //...
+    System.out.println("Compress PPT.");
+  }
+
+  @Override
+  public void visit(PdfFile pdfFile) {
+    //...
+    System.out.println("Compress PDF.");
+  }
+
+  @Override
+  public void visit(WordFile wordFile) {
+    //...
+    System.out.println("Compress WORD.");
+  }
+
+}
+
+public class ToolApplication {
+  public static void main(String[] args) {
+    Extractor extractor = new Extractor();
+    List<ResourceFile> resourceFiles = listAllResourceFiles(args[0]);
+    for (ResourceFile resourceFile : resourceFiles) {
+      resourceFile.accept(extractor);
+    }
+
+    Compressor compressor = new Compressor();
+    for(ResourceFile resourceFile : resourceFiles) {
+      resourceFile.accept(compressor);
+    }
+  }
+
+  private static List<ResourceFile> listAllResourceFiles(String resourceDirectory) {
+    List<ResourceFile> resourceFiles = new ArrayList<>();
+    //...根据后缀(pdf/ppt/word)由工厂方法创建不同的类对象(PdfFile/PPTFile/WordFile)
+    resourceFiles.add(new PdfFile("a.pdf"));
+    resourceFiles.add(new WordFile("b.word"));
+    resourceFiles.add(new PPTFile("c.ppt"));
+    return resourceFiles;
+  }
+}
+```
+
+**除了访问者模式，这个例子还有其他实现方案吗？**
+
+实际上，开发这个工具有很多种代码设计和实现思路。为了讲解访问者模式，上节课我们选择了用访问者模式来实现。实际上，我们还有其他的实现方法，比如，我们还可以利用工厂模式来实现，定义一个包含 extract2txt() 接口函数的 Extractor 接口。PdfExtractor、PPTExtractor、WordExtractor 类实现 Extractor 接口，并且在各自的 extract2txt() 函数中，分别实现 Pdf、PPT、Word 格式文件的文本内容抽取。ExtractorFactory 工厂类根据不同的文件类型，返回不同的 Extractor。
+```java
+
+public abstract class ResourceFile {
+  protected String filePath;
+  public ResourceFile(String filePath) {
+    this.filePath = filePath;
+  }
+  public abstract ResourceFileType getType();
+}
+
+public class PdfFile extends ResourceFile {
+  public PdfFile(String filePath) {
+    super(filePath);
+  }
+
+  @Override
+  public ResourceFileType getType() {
+    return ResourceFileType.PDF;
+  }
+
+  //...
+}
+
+//...PPTFile/WordFile跟PdfFile代码结构类似，此处省略...
+
+public interface Extractor {
+  void extract2txt(ResourceFile resourceFile);
+}
+
+public class PdfExtractor implements Extractor {
+  @Override
+  public void extract2txt(ResourceFile resourceFile) {
+    //...
+  }
+}
+
+//...PPTExtractor/WordExtractor跟PdfExtractor代码结构类似，此处省略...
+
+public class ExtractorFactory {
+  private static final Map<ResourceFileType, Extractor> extractors = new HashMap<>();
+  static {
+    extractors.put(ResourceFileType.PDF, new PdfExtractor());
+    extractors.put(ResourceFileType.PPT, new PPTExtractor());
+    extractors.put(ResourceFileType.WORD, new WordExtractor());
+  }
+
+  public static Extractor getExtractor(ResourceFileType type) {
+    return extractors.get(type);
+  }
+}
+
+public class ToolApplication {
+  public static void main(String[] args) {
+    List<ResourceFile> resourceFiles = listAllResourceFiles(args[0]);
+    for (ResourceFile resourceFile : resourceFiles) {
+      Extractor extractor = ExtractorFactory.getExtractor(resourceFile.getType());
+      extractor.extract2txt(resourceFile);
+    }
+  }
+
+  private static List<ResourceFile> listAllResourceFiles(String resourceDirectory) {
+    List<ResourceFile> resourceFiles = new ArrayList<>();
+    //...根据后缀(pdf/ppt/word)由工厂方法创建不同的类对象(PdfFile/PPTFile/WordFile)
+    resourceFiles.add(new PdfFile("a.pdf"));
+    resourceFiles.add(new WordFile("b.word"));
+    resourceFiles.add(new PPTFile("c.ppt"));
+    return resourceFiles;
+  }
+}
+```
+当需要添加新的功能的时候，比如压缩资源文件，类似抽取文本内容功能的代码实现，我们只需要添加一个 Compressor 接口，PdfCompressor、PPTCompressor、WordCompressor 三个实现类，以及创建它们的 CompressorFactory 工厂类即可。唯一需要修改的只有最上层的 ToolApplication 类。基本上符合“对扩展开放、对修改关闭”的设计原则。
+
+<u>对于资源文件处理工具这个例子，如果工具提供的功能并不是非常多，只有几个而已，那我更推荐使用工厂模式的实现方式，毕竟代码更加清晰、易懂。相反，如果工具提供非常多的功能，比如有十几个，那我更推荐使用访问者模式，因为访问者模式需要定义的类要比工厂模式的实现方式少很多，类太多也会影响到代码的可维护性。</u>
+
+#### 2.单分派/双分派
+
+支持双分派的语言不需要访问者模式
+
+所谓 Single Dispatch，指的是执行哪个对象的方法，根据对象的运行时类型来决定；执行对象的哪个方法，根据方法参数的<u>编译时类型来决定</u>。所谓 Double Dispatch，指的是执行哪个对象的方法，根据对象的运行时类型来决定；执行对象的哪个方法，根据方法参数的<u>运行时类型来决定</u>。
+
+如何理解“Dispatch”这个单词呢？ 在面向对象编程语言中，我们可以把方法调用理解为一种消息传递，也就是“Dispatch”。一个对象调用另一个对象的方法，就相当于给它发送一条消息。这条消息起码要包含对象名、方法名、方法参数。
+
+如何理解“Single”“Double”这两个单词呢？“Single”“Double”指的是执行哪个对象的哪个方法，跟几个因素的运行时类型有关。我们进一步解释一下。Single Dispatch 之所以称为“Single”，是因为执行哪个对象的哪个方法，只跟“对象”的运行时类型有关。Double Dispatch 之所以称为“Double”，是因为执行哪个对象的哪个方法，跟“对象”和“方法参数”两者的运行时类型有关。
+
+具体到编程语言的语法机制，Single Dispatch 和 Double Dispatch 跟多态和函数重载直接相关。当前主流的面向对象编程语言（比如，Java、C++、C#）都只支持 Single Dispatch，不支持 Double Dispatch。
+
+Java 支持多态特性，代码可以在运行时获得对象的实际类型（也就是前面提到的运行时类型），然后根据实际类型决定调用哪个方法。<u>尽管 Java 支持函数重载，但 Java 设计的函数重载的语法规则是，并不是在运行时，根据传递进函数的参数的实际类型，来决定调用哪个重载函数，而是在编译时，根据传递进函数的参数的声明类型（也就是前面提到的编译时类型），来决定调用哪个重载函数。也就是说，具体执行哪个对象的哪个方法，只跟对象的运行时类型有关，跟参数的运行时类型无关。所以，Java 语言只支持 Single Dispatch。</u>
+
+这么说比较抽象，我举个例子来具体说明一下，代码如下所示：
+```java
+
+public class ParentClass {
+  public void f() {
+    System.out.println("I am ParentClass's f().");
+  }
+}
+
+public class ChildClass extends ParentClass {
+  public void f() {
+    System.out.println("I am ChildClass's f().");
+  }
+}
+
+public class SingleDispatchClass {
+  public void polymorphismFunction(ParentClass p) {
+    p.f();
+  }
+
+  public void overloadFunction(ParentClass p) {
+    System.out.println("I am overloadFunction(ParentClass p).");
+  }
+
+  public void overloadFunction(ChildClass c) {
+    System.out.println("I am overloadFunction(ChildClass c).");
+  }
+}
+
+public class DemoMain {
+  public static void main(String[] args) {
+    SingleDispatchClass demo = new SingleDispatchClass();
+    ParentClass p = new ChildClass();
+    demo.polymorphismFunction(p);//执行哪个对象的方法，由对象的实际类型决定
+    demo.overloadFunction(p);//执行对象的哪个方法，由参数对象的声明类型决定
+  }
+}
+
+//代码执行结果:
+I am ChildClass's f().
+I am overloadFunction(ParentClass p).
+```
+在上面的代码中，第 31 行代码的 polymorphismFunction() 函数，执行 p 的实际类型的 f() 函数，也就是 ChildClass 的 f() 函数。第 32 行代码的 overloadFunction() 函数，匹配的是重载函数中的 overloadFunction(ParentClass p)，也就是<u>根据 p 的声明类型来决定匹配哪个重载函数。</u>
+
+假设 Java 语言支持 Double Dispatch，那下面的代码（摘抄自上节课中第二段代码，建议结合上节课的讲解一块理解）中的第 37 行就不会报错。代码会在运行时，根据参数（resourceFile）的实际类型（PdfFile、PPTFile、WordFile），来决定使用 extract2txt 的三个重载函数中的哪一个。那下面的代码实现就能正常运行了，也就不需要访问者模式了。这也回答了为什么支持 Double Dispatch 的语言不需要访问者模式。
+```java
+
+public abstract class ResourceFile {
+  protected String filePath;
+  public ResourceFile(String filePath) {
+    this.filePath = filePath;
+  }
+}
+
+public class PdfFile extends ResourceFile {
+  public PdfFile(String filePath) {
+    super(filePath);
+  }
+  //...
+}
+//...PPTFile、WordFile代码省略...
+public class Extractor {
+  public void extract2txt(PPTFile pptFile) {
+    //...
+    System.out.println("Extract PPT.");
+  }
+
+  public void extract2txt(PdfFile pdfFile) {
+    //...
+    System.out.println("Extract PDF.");
+  }
+
+  public void extract2txt(WordFile wordFile) {
+    //...
+    System.out.println("Extract WORD.");
+  }
+}
+
+public class ToolApplication {
+  public static void main(String[] args) {
+    Extractor extractor = new Extractor();
+    List<ResourceFile> resourceFiles = listAllResourceFiles(args[0]);
+    for (ResourceFile resourceFile : resourceFiles) {
+      extractor.extract2txt(resourceFile);
+    }
+  }
+
+  private static List<ResourceFile> listAllResourceFiles(String resourceDirectory) {
+    List<ResourceFile> resourceFiles = new ArrayList<>();
+    //...根据后缀(pdf/ppt/word)由工厂方法创建不同的类对象(PdfFile/PPTFile/WordFile)
+    resourceFiles.add(new PdfFile("a.pdf"));
+    resourceFiles.add(new WordFile("b.word"));
+    resourceFiles.add(new PPTFile("c.ppt"));
+    return resourceFiles;
+  }
+}
+```
+
+### 备忘录模式
+
+#### 1.备忘录模式的原理与实现
+
+> 在不违背封装原则的前提下，捕获一个对象的内部状态，并在该对象之外保存这个状态，以便之后恢复对象为先前的状态。
+
+这个模式的定义主要表达了两部分内容。一部分是，存储副本以便后期恢复。这一部分很好理解。另一部分是，要在不违背封装原则的前提下，进行对象的备份和恢复。
+
+假设有这样一道面试题，希望你编写一个小程序，可以接收命令行的输入。用户输入文本时，程序将其追加存储在内存文本中；用户输入“:list”，程序在命令行中输出内存文本的内容；用户输入“:undo”，程序会撤销上一次输入的文本，也就是从内存文本中将上次输入的文本删除掉。
+我举了个小例子来解释一下这个需求，如下所示：
+```java
+>hello
+>:list
+hello
+>world
+>:list
+helloworld
+>:undo
+>:list
+hello
+```
+实现代码如下：
+```java
+
+public class InputText {
+  private StringBuilder text = new StringBuilder();
+
+  public String getText() {
+    return text.toString();
+  }
+
+  public void append(String input) {
+    text.append(input);
+  }
+
+  public Snapshot createSnapshot() {
+    return new Snapshot(text.toString());
+  }
+
+  public void restoreSnapshot(Snapshot snapshot) {
+    this.text.replace(0, this.text.length(), snapshot.getText());
+  }
+}
+
+public class Snapshot {
+  private String text;
+
+  public Snapshot(String text) {
+    this.text = text;
+  }
+
+  public String getText() {
+    return this.text;
+  }
+}
+
+public class SnapshotHolder {
+  private Stack<Snapshot> snapshots = new Stack<>();
+
+  public Snapshot popSnapshot() {
+    return snapshots.pop();
+  }
+
+  public void pushSnapshot(Snapshot snapshot) {
+    snapshots.push(snapshot);
+  }
+}
+
+public class ApplicationMain {
+  public static void main(String[] args) {
+    InputText inputText = new InputText();
+    SnapshotHolder snapshotsHolder = new SnapshotHolder();
+    Scanner scanner = new Scanner(System.in);
+    while (scanner.hasNext()) {
+      String input = scanner.next();
+      if (input.equals(":list")) {
+        System.out.println(inputText.toString());
+      } else if (input.equals(":undo")) {
+        Snapshot snapshot = snapshotsHolder.popSnapshot();
+        inputText.restoreSnapshot(snapshot);
+      } else {
+        snapshotsHolder.pushSnapshot(inputText.createSnapshot());
+        inputText.append(input);
+      }
+    }
+  }
+}
+```
+有两点：其一，定义一个独立的类（Snapshot 类）来表示快照，而不是复用 InputText 类。这个类只暴露 get() 方法，没有 set() 等任何修改内部状态的方法。其二，在 InputText 类中，我们把 setText() 方法重命名为 restoreSnapshot() 方法，用意更加明确，只用来恢复对象。
+
+实际上，上面的代码实现就是典型的备忘录模式的代码实现。
+
+##### 如何优化内存和时间消耗？
+
+当我们需要恢复到某一时间点的备份的时候，如果这一时间点有做全量备份，我们直接拿来恢复就可以了。如果这一时间点没有对应的全量备份，我们就先找到最近的一次全量备份，然后用它来恢复，之后执行此次全量备份跟这一时间点之间的所有增量备份，也就是对应的操作或者数据变动。这样就能减少全量备份的数量和频率，减少对时间、内存的消耗。
+
+### 命令模式
+
+> 命令模式将请求（命令）封装为一个对象，这样可以使用不同的请求参数化其他对象（将不同请求依赖注入到其他对象），并且能够支持请求（命令）的排队执行、记录日志、撤销等（附加控制）功能。
+
+<u>落实到编码实现，命令模式用的最核心的实现手段，是将函数封装成对象。我们知道，C 语言支持函数指针，我们可以把函数当作变量传递来传递去。但是，在大部分编程语言中，函数没法儿作为参数传递给其他函数，也没法儿赋值给变量。借助命令模式，我们可以将函数封装成对象。具体来说就是，设计一个包含这个函数的类，实例化一个对象传来传去，这样就可以实现把函数像对象一样使用。从实现的角度来说，它类似我们之前讲过的回调。</u>
+
+当我们把函数封装成对象之后，对象就可以存储下来，方便控制执行。所以，<u>命令模式的主要作用和应用场景，是用来控制命令的执行，比如，异步、延迟、排队执行命令、撤销重做命令、存储命令、给命令记录日志等等，这才是命令模式能发挥独一无二作用的地方。<u>
+
+#### 1. 命令模式 VS 策略模式
+
+命令模式跟策略模式、工厂模式非常相似啊，那它们的区别在哪里呢？不仅如此，在留言区中我还看到有不止一个同学反映，感觉学过的很多模式都很相似。不知道你有没有类似的感觉呢？
+
+实际上，每个设计模式都应该由两部分组成：第一部分是应用场景，即这个模式可以解决哪类问题；第二部分是解决方案，即这个模式的设计思路和具体的代码实现。不过，代码实现并不是模式必须包含的。如果你单纯地只关注解决方案这一部分，甚至只关注代码实现，就会产生大部分模式看起来都很相似的错觉。
+
+<u>实际上，设计模式之间的主要区别还是在于设计意图，也就是应用场景。单纯地看设计思路或者代码实现，有些模式确实很相似，比如策略模式和工厂模式。</u>
+
+<u>之前讲策略模式的时候，我们有讲到，策略模式包含策略的定义、创建和使用三部分，从代码结构上来，它非常像工厂模式。它们的区别在于，策略模式侧重“策略”或“算法”这个特定的应用场景，用来解决根据运行时状态从一组策略中选择不同策略的问题，而工厂模式侧重封装对象的创建过程，这里的对象没有任何业务场景的限定，可以是策略，但也可以是其他东西。从设计意图上来，这两个模式完全是两回事儿。</u>
+
+接下来，我们再来看命令模式跟策略模式的区别。你可能会觉得，命令的执行逻辑也可以看作策略，那它是不是就是策略模式了呢？实际上，这两者有一点细微的区别。
+
+<u>在策略模式中，不同的策略具有相同的目的、不同的实现、互相之间可以替换。比如，BubbleSort、SelectionSort 都是为了实现排序的，只不过一个是用冒泡排序算法来实现的，另一个是用选择排序算法来实现的。而在命令模式中，不同的命令具有不同的目的，对应不同的处理逻辑，并且互相之间不可替换。</u>
+
+#### 2.原理与实现
+
+落实到编码实现，命令模式用到最核心的实现手段，就是将函数封装成对象。我们知道，在大部分编程语言中，函数是没法作为参数传递给其他函数的，也没法赋值给变量。借助命令模式，我们将函数封装成对象，这样就可以实现把函数像对象一样使用。
+
+假设我们正在开发一个类似《天天酷跑》或者《QQ 卡丁车》这样的手游。这种游戏本身的复杂度集中在客户端。后端基本上只负责数据（比如积分、生命值、装备）的更新和查询，所以，后端逻辑相对于客户端来说，要简单很多。
+
+为了提高性能，我们会把游戏中玩家的信息保存在内存中。在游戏进行的过程中，只更新内存中的数据，游戏结束之后，再将内存中的数据存档，也就是持久化到数据库中。为了降低实现的难度，一般来说，同一个游戏场景里的玩家，会被分配到同一台服务上。这样，一个玩家拉取同一个游戏场景中的其他玩家的信息，就不需要跨服务器去查找了，实现起来就简单了很多。
+
+一般来说，游戏客户端和服务器之间的数据交互是比较频繁的，所以，为了节省网络连接建立的开销，客户端和服务器之间一般采用长连接的方式来通信。通信的格式有多种，比如 Protocol Buffer、JSON、XML，甚至可以自定义格式。不管是什么格式，客户端发送给服务器的请求，一般都包括两部分内容：指令和数据。其中，指令我们也可以叫作事件，数据是执行这个指令所需的数据。
+
+服务器在接收到客户端的请求之后，会解析出指令和数据，并且根据指令的不同，执行不同的处理逻辑。对于这样的一个业务场景，一般有两种架构实现思路。
+
+<u>常用的一种实现思路是利用多线程。一个线程接收请求，接收到请求之后，启动一个新的线程来处理请求。具体点讲，一般是通过一个主线程来接收客户端发来的请求。每当接收到一个请求之后，就从一个专门用来处理请求的线程池中，捞出一个空闲线程来处理。</u>
+
+<u>另一种实现思路是在一个线程内轮询接收请求和处理请求。</u>这种处理方式不太常见。尽管它无法利用多线程多核处理的优势，但是对于 IO 密集型的业务来说，它避免了多线程不停切换对性能的损耗，并且克服了多线程编程 Bug 比较难调试的缺点，也算是手游后端服务器开发中比较常见的架构模式了。
+
+我们接下来就重点讲一下第二种实现方式。
+
+整个手游后端服务器轮询获取客户端发来的请求，获取到请求之后，借助命令模式，把请求包含的数据和处理逻辑封装为命令对象，并存储在内存队列中。然后，再从队列中取出一定数量的命令来执行。执行完成之后，再重新开始新的一轮轮询。具体的示例代码如下所示，你可以结合着一块看下。
+```java
+
+public interface Command {
+  void execute();
+}
+
+public class GotDiamondCommand implements Command {
+  // 省略成员变量
+
+  public GotDiamondCommand(/*数据*/) {
+    //...
+  }
+
+  @Override
+  public void execute() {
+    // 执行相应的逻辑
+  }
+}
+//GotStartCommand/HitObstacleCommand/ArchiveCommand类省略
+
+public class GameApplication {
+  private static final int MAX_HANDLED_REQ_COUNT_PER_LOOP = 100;
+  private Queue<Command> queue = new LinkedList<>();
+
+  public void mainloop() {
+    while (true) {
+      List<Request> requests = new ArrayList<>();
+      
+      //省略从epoll或者select中获取数据，并封装成Request的逻辑，
+      //注意设置超时时间，如果很长时间没有接收到请求，就继续下面的逻辑处理。
+      
+      for (Request request : requests) {
+        Event event = request.getEvent();
+        Command command = null;
+        if (event.equals(Event.GOT_DIAMOND)) {
+          command = new GotDiamondCommand(/*数据*/);
+        } else if (event.equals(Event.GOT_STAR)) {
+          command = new GotStartCommand(/*数据*/);
+        } else if (event.equals(Event.HIT_OBSTACLE)) {
+          command = new HitObstacleCommand(/*数据*/);
+        } else if (event.equals(Event.ARCHIVE)) {
+          command = new ArchiveCommand(/*数据*/);
+        } // ...一堆else if...
+
+        queue.add(command);
+      }
+
+      int handledCount = 0;
+      while (handledCount < MAX_HANDLED_REQ_COUNT_PER_LOOP) {
+        if (queue.isEmpty()) {
+          break;
+        }
+        Command command = queue.poll();
+        command.execute();
+      }
+    }
+  }
+}
+```
