@@ -248,3 +248,73 @@ func (sh serverHandler) ServeHTTP(rw ResponseWriter, req *Request) {
   handler.ServeHTTP(rw, req)
 }
 ```
+如果入口服务 server 结构已经设置了 Handler，就调用这个 Handler 来处理此次请求，反之则使用库自带的 DefaultServerMux。
+
+这里的 serverHandler 设计，能同时保证这个库的扩展性和易用性：你可以很方便使用默认方法处理请求，但是一旦有需求，也能自己扩展出方法处理请求。
+
+那么 DefaultServeMux 是怎么寻找 Handler 的呢，这就是思维导图的最后一部分**第七层**。
+![](_images/4-4.jpg)
+DefaultServeMux.Handle 是一个非常简单的 map 实现，key 是路径（pattern），value 是这个 pattern 对应的处理函数（handler）。它是通过 mux.match(path) 寻找对应 Handler，也就是从 DefaultServeMux 内部的 map 中直接根据 key 寻找到 value 的。
+
+这种根据 map 直接查找路由的方式是不是可以满足我们的路由需求呢？我们会在第三讲路由中详细解说。
+
+好，HTTP 库 Server 的代码流程我们就梳理完成了，整个逻辑线大致是：创建服务 -> 监听请求 -> 创建连接 -> 处理请求.
+
+这里我也给你整理了一下逻辑线各层的关键结论：
+- 第一层，标准库创建 HTTP 服务是通过创建一个 Server 数据结构完成的；
+- 第二层，Server 数据结构在 for 循环中不断监听每一个连接；
+- 第三层，每个连接默认开启一个 Goroutine 为其服务；
+- 第四、五层，serverHandler 结构代表请求对应的处理逻辑，并且通过这个结构进行具体业务逻辑处理；
+- 第六层，Server 数据结构如果没有设置处理函数 Handler，默认使用 DefaultServerMux 处理请求；
+- 第七层，DefaultServerMux 是使用 map 结构来存储和查找路由规则。
+
+这条逻辑线是 HTTP 服务启动最核心的主流程逻辑，后面我们会基于这个流程继续开发，你要掌握到能背下来的程度。
+
+#### 创建框架的 Server 结构
+
+咱也分析了主流程代码，其中第一层的关键结论就是：net/http 标准库创建服务，实质上就是通过创建 Server 数据结构来完成的。所以接下来，我们就来创建一个 Server 数据结构。
+
+通过 go doc net/http.Server 我们可以看到 Server 的结构：
+```go
+type Server struct {
+    // 请求监听地址
+  Addr string
+    // 请求核心处理函数
+  Handler Handler 
+  ...
+}
+```
+其中最核心的是 Handler 这个字段，从主流程中我们知道（第六层关键结论），当 Handler 这个字段设置为空的时候，它会默认使用 DefaultServerMux 这个路由器来填充这个值，但是我们一般都会使用自己定义的路由来替换这个默认路由。
+
+所以在框架代码中，我们要创建一个自己的核心路由结构，实现 Handler。
+
+先来理一下目录结构，我们在GitHub上创建一个项目 [coredemo](https://github.com/gohade/coredemo/tree/geekbang/01)，这个项目是这门课程所有的代码集合，包含要实现的框架和使用框架的示例业务代码。
+
+<u>所有的框架代码都存放在 framework 文件夹中，而所有的示例业务代码都存放在 framework 文件夹之外。这里为了后面称呼方便，我们就把 framework 文件夹叫框架文件夹，而把外层称为业务文件夹。</u>
+
+当然 GitHub 上的这个 coredemo 是我在写课程的时候为了演示创建的，推荐你跟着一步一步写。成品在[hade 项目](https://github.com/gohade/hade)里，你可以先看看，在最后发布的时候，我们会将整个项目进行发布。在一个新的业务中，如果要使用到我们自己写好的框架，可以直接通过引用 “import 项目地址 /framework” 来引入，在最后一部分做实战项目的时候我们会具体演示。
+
+好，下面我们来一步步实现这个项目~。
+
+创建一个 framework 文件夹，新建 core.go，在里面写入。
+```go
+
+package framework
+
+import "net/http"
+
+// 框架核心结构
+type Core struct {
+}
+
+// 初始化框架核心结构
+func NewCore() *Core {
+  return &Core{}
+}
+
+// 框架核心结构实现Handler接口
+func (c *Core) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+  // TODO
+}
+
+```
