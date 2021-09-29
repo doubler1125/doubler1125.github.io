@@ -38,6 +38,6 @@
 
 ### 6.TODO: 开源与项目实战
 
-## 二、[写一个Web框架(Golang)](webFrameGo)
+## 二、[写一个Web框架(Go)](webFrameGo)
 ## 三、[持续交付](cicd)
 
