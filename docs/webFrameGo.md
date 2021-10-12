@@ -214,6 +214,7 @@ log.Fatal(http.ListenAndServe(":8080", nil))
 我们先顺着 http.ListenAndServe 的脉络读。
 
 ![](_images/4-2.jpg)
+
 **第一层**，http.ListenAndServe 本质是通过创建一个 Server 数据结构，调用 server.ListenAndServe 对外提供服务，这一层完全是比较简单的封装，目的是，将 Server 结构创建服务的方法 ListenAndServe ，直接作为库函数对外提供，增加库的易用性。
 
 **第二层**，创建服务的方法 ListenAndServe 先定义了监听信息 net.Listen，然后调用 Serve 函数。
@@ -318,3 +319,30 @@ func (c *Core) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 }
 
 ```
+而在业务文件夹中创建 main.go，其中的 main 函数就变成这样：
+```go
+
+func main() {
+  server := &http.Server{
+        // 自定义的请求核心处理函数
+    Handler: framework.NewCore(),
+        // 请求监听地址
+    Addr:    ":8080",
+  }
+  server.ListenAndServe()
+}
+
+```
+整理下这段代码，我们通过自己创建了 Server 数据结构，并且在数据结构中创建了自定义的 Handler（Core 数据结构）和监听地址，实现了一个 HTTP 服务。这个服务的具体业务逻辑都集中在我们自定义的 Core 结构中，后续我们要做的事情就是不断丰富这个 Core 数据结构的功能逻辑
+
+后续每节课学完之后，我都会把代码放在对应的 GitHub 的分支中。你跟着课程敲完代码过程中有不了解的地方，可以对比参考分支。
+
+本节课我们完成的代码分支是：geekbang/01 ，代码结构我也截了图：
+
+![](_images/4-5.jpg)
+
+#### 小结
+
+今天我以 net/http 标准库为例，分享了快速熟悉代码库的技巧，库函数 > 结构定义 > 结构函数。在阅读代码库时，从功能出发，先读对外库函数，再细读这个库提供的结构，搞清楚功能和对应结构之后，最后基于实际需求看每个结构函数。
+
+主流程的链条比较长，但是你先理顺逻辑，记住几个关键的节点，再结合思维导图，就能记住整个主流程逻辑了，之后所有关于 HTTP 的细节和问题，我们都会基于这个主流程逻辑来思考和回答。
