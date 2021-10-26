@@ -462,4 +462,366 @@ func main() {
 
 而且这个时候， Context 已经有多层父节点。因为，在代码中，每执行一次 WithCancel、WithValue，就封装了一层 Context，我们通过这一张流程图能清晰看到最终 Context 的生成层次。
 ![](_images/4-9.jpg)
-你发现了吗，其实每个连接的 Context 都是基于 baseContext 复制来的。对应到代码中就是，在为某个连接开启 Goroutine 的时候，为当前连接创建了一个 connContext，这个 connContext 是基于 server 中的 Context 而来，而 server 中 Context 的基础就是 baseContext。
+你发现了吗，<u>其实每个连接的 Context 都是基于 baseContext 复制来的</u>。对应到代码中就是，在为某个连接开启 Goroutine 的时候，为当前连接创建了一个 connContext，这个 connContext 是基于 server 中的 Context 而来，而 server 中 Context 的基础就是 baseContext。
+
+所以，Context 从哪里产生这个问题，我们就解决了，但是如果我们想要对 Context 进行必要的修改，还要从上下游逻辑中，找到它的修改点在哪里。
+
+生成最终的 Context 的流程中，net/http 设计了两处可以注入修改的地方，都在 Server 结构里面，一处是 BaseContext，另一处是 ConnContext。
+
+- BaseContext 是整个 Context 生成的源头，如果我们不希望使用默认的 context.Backgroud()，可以替换这个源头。
+- 而在每个连接生成自己要使用的 Context 时，会调用 ConnContext ，它的第二个参数是 net.Conn，能让我们对某些特定连接进行设置，比如要针对性设置某个调用 IP。
+
+最后，我们回看一下 req.ctx 是否能感知连接异常。
+![](_images/4-10.jpg)
+
+是可以的，因为链条中一个父节点为 CancelContext，其 cancelFunc 存储在代表连接的 conn 结构中，连接异常的时候，会触发这个函数句柄。
+
+好，讲完 context 库的核心设计思想，以及在 net/http 的主流程逻辑中嵌入 context 库的关键实现，我们现在心中有图了，就可以撸起袖子开始写框架代码了。
+
+你是不是有点疑惑，为啥要自己先理解一遍 context 标准库的生成流程，咱们直接动手干不是更快？有句老话说得好，磨刀不误砍柴功。
+
+我们确实是要自定义，不是想直接使用标准库的 Context，因为它完全是标准库 Context 接口的实现，只能控制链条结束，封装性并不够。但是只有先搞清楚了 context 标准库的设计思路，才能精准确定自己能怎么改、改到什么程度合适，下手的时候才不容易懵。
+
+下面我们就基于刚才讲的设计思路，从封装自己的 Context 开始，写今天的核心逻辑，也就是为单个请求设置超时，最后考虑一些边界场景，并且进行优化。
+
+我们还是再拉一个分支 [geekbang/02](https://github.com/gohade/coredemo/tree/geekbang/02/framework)，接着上一节课的代码结构，在框架文件夹中封装一个自己的 Context。
+
+#### 封装一个自己的 Context
+
+在框架里，我们需要有更强大的 Context，除了可以控制超时之外，常用的功能比如获取请求、返回结果、实现标准库的 Context 接口，也都要有。
+
+<u>我们首先来设计提供获取请求、返回结果功能。</u>
+
+先看一段未封装自定义 Context 的控制器代码：
+```go
+
+// 控制器
+func Foo1(request *http.Request, response http.ResponseWriter) {
+  obj := map[string]interface{}{
+    "data":   nil,
+  }
+    // 设置控制器 response 的 header 部分
+  response.Header().Set("Content-Type", "application/json")
+
+    // 从请求体中获取参数
+  foo := request.PostFormValue("foo")
+  if foo == "" {
+    foo = "10"
+  }
+  fooInt, err := strconv.Atoi(foo)
+  if err != nil {
+    response.WriteHeader(500)
+    return
+  }
+    // 构建返回结构
+  obj["data"] = fooInt 
+  byt, err := json.Marshal(obj)
+  if err != nil {
+    response.WriteHeader(500)
+    return
+  }
+    // 构建返回状态，输出返回结构
+  response.WriteHeader(200)
+  response.Write(byt)
+  return
+}
+```
+这段代码重点是操作调用了 http.Request 和 http.ResponseWriter ，实现 WebService 接收和处理协议文本的功能。但这两个结构提供的接口粒度太细了，需要使用者非常熟悉这两个结构的内部字段，比如 response 里设置 Header 和设置 Body 的函数，用起来肯定体验不好。
+
+如果我们能将这些内部实现封装起来，对外暴露语义化高的接口函数，那么我们这个框架的易用性肯定会明显提升。什么是好的封装呢？再看这段有封装的代码：
+```go
+
+// 控制器
+func Foo2(ctx *framework.Context) error {
+  obj := map[string]interface{}{
+    "data":   nil,
+  }
+    // 从请求体中获取参数
+   fooInt := ctx.FormInt("foo", 10)
+    // 构建返回结构  
+  obj["data"] = fooInt
+    // 输出返回结构
+  return ctx.Json(http.StatusOK, obj)
+}
+```
+你可以明显感受到封装性高的 Foo2 函数，更优雅更易读了。首先它的代码量更少，而且语义性也更好，近似对业务的描述：从请求体中获取 foo 参数，并且封装为 Map，最后 JSON 输出。
+
+思路清晰了，所以这里可以将 request 和 response 封装到我们自定义的 Context 中，对外提供请求和结果的方法，我们把这个 Context 结构写在框架文件夹的 context.go 文件中：
+```go
+
+// 自定义 Context
+type Context struct {
+  request        *http.Request
+  responseWriter http.ResponseWriter
+  ...
+}
+```
+对 request 和 response 封装的具体实现，我们到第五节课封装的时候再仔细说。
+
+<u>然后是第二个功能，标准库的 Context 接口。</u>
+
+标准库的 Context 通用性非常高，基本现在所有第三方库函数，都会根据官方的建议，将第一个参数设置为标准 Context 接口。所以我们封装的结构只有实现了标准库的 Context，才能方便直接地调用。
+
+到底有多方便，我们看使用示例：
+```go
+
+func Foo3(ctx *framework.Context) error {
+  rdb := redis.NewClient(&redis.Options{
+    Addr:     "localhost:6379",
+    Password: "", // no password set
+    DB:       0,  // use default DB
+  })
+
+  return rdb.Set(ctx, "key", "value", 0).Err()
+}
+
+```
+这里使用了 go-redis 库，它每个方法的参数中都有一个标准 Context 接口，这让我们能将自定义的 Context 直接传递给 rdb.Set。
+
+所以在我们的框架上实现这一步，只需要调用刚才封装的 request 中的 Context 的标准接口就行了，很简单，我们继续在 context.go 中进行补充：
+```go
+
+func (ctx *Context) BaseContext() context.Context {
+  return ctx.request.Context()
+}
+
+func (ctx *Context) Done() <-chan struct{} {
+  return ctx.BaseContext().Done()
+}
+```
+这里举例了两个 method 的实现，其他的都大同小异就不在文稿里展示，你可以先自己写，然后对照我放在GitHub上的完整代码检查一下。
+
+自己封装的 Context 最终需要提供四类功能函数：
+- base 封装基本的函数功能，比如获取 http.Request 结构
+- context 实现标准 Context 接口
+- request 封装了 http.Request 的对外接口
+- response 封装了 http.ResponseWriter 对外接口
+
+完成之后，使用我们的 IDE 里面的结构查看器（每个 IDE 显示都不同），就能查看到如下的函数列表：
+![](_images/4-11.jpg)
+
+有了我们自己封装的 Context 之后，控制器就非常简化了。把框架定义的 ControllerHandler 放在框架目录下的 controller.go 文件中：
+```go
+
+type ControllerHandler func(c *Context) error
+```
+把处理业务的控制器放在业务目录下的 controller.go 文件中：
+```go
+
+func FooControllerHandler(ctx *framework.Context) error {
+  return ctx.Json(200, map[string]interface{}{
+    "code": 0,
+  })
+}
+```
+参数只有一个 framework.Context，是不是清爽很多，这都归功于刚完成的自定义 Context。
+
+#### 为单个请求设置超时
+
+上面我们封装了自定义的 Context，从设计层面实现了标准库的 Context。下面回到我们这节课核心要解决的问题，为单个请求设置超时。
+
+如何使用自定义 Context 设置超时呢？结合前面分析的标准库思路，我们三步走完成：
+- 继承 request 的 Context，创建出一个设置超时时间的 Context；
+- 创建一个新的 Goroutine 来处理具体的业务逻辑；
+- 设计事件处理顺序，当前 Goroutine 监听超时时间 Contex 的 Done() 事件，和具体的业务处理结束事件，哪个先到就先处理哪个。
+
+理清步骤，我们就可以在业务的 controller.go 文件中完成业务逻辑了。<u>第一步生成一个超时的 Context：</u>
+```go
+
+durationCtx, cancel := context.WithTimeout(c.BaseContext(), time.Duration(1*time.Second))
+// 这里记得当所有事情处理结束后调用 cancel，告知 durationCtx 的后续 Context 结束
+defer cancel()
+```
+这里为了最终在浏览器做验证，我设置超时事件为 1s，这样最终验证的时候，最长等待 1s 就可以知道超时是否生效。
+
+<u>第二步创建一个新的 Goroutine 来处理业务逻辑：</u>
+```go
+
+finish := make(chan struct{}, 1)
+
+go func() {
+    ...
+    // 这里做具体的业务
+    time.Sleep(10 * time.Second)
+        c.Json(200, "ok")
+        ...
+        // 新的 goroutine 结束的时候通过一个 finish 通道告知父 goroutine
+    finish <- struct{}{}
+}()
+```
+为了最终的验证效果，我们使用 time.Sleep 将新 Goroutine 的业务逻辑事件人为往后延迟了 10s，再输出“ok”，这样最终验证的时候，效果比较明显，因为前面的超时设置会在 1s 生效了，浏览器就有表现了。
+
+到这里我们这里先不急着进入第三步，还有错误处理情况没有考虑到位。这个新创建的 Goroutine 如果出现未知异常怎么办？需要我们额外捕获吗？
+
+<u>其实在 Golang 的设计中，每个 Goroutine 都是独立存在的，父 Goroutine 一旦使用 Go 关键字开启了一个子 Goroutine，父子 Goroutine 就是平等存在的，他们互相不能干扰。而在异常面前，所有 Goroutine 的异常都需要自己管理，不会存在父 Goroutine 捕获子 Goroutine 异常的操作。</u>
+
+所以切记：在 Golang 中，每个 Goroutine 创建的时候，我们要使用 defer 和 recover 关键字为当前 Goroutine 捕获 panic 异常，并进行处理，否则，任意一处 panic 就会导致整个进程崩溃！
+
+这里你可以标个重点，面试会经常被问到。
+
+搞清楚这一点，<u>我们回看第二步，做完具体业务逻辑就结束是不行的，还需要处理 panic。</u>所以这个 Goroutine 应该要有两个 channel 对外传递事件：
+```go
+
+// 这个 channal 负责通知结束
+finish := make(chan struct{}, 1)
+// 这个 channel 负责通知 panic 异常
+panicChan := make(chan interface{}, 1)
+
+go func() {
+        // 这里增加异常处理
+    defer func() {
+      if p := recover(); p != nil {
+        panicChan <- p
+      }
+    }()
+    // 这里做具体的业务
+    time.Sleep(10 * time.Second)
+        c.Json(200, "ok")
+        ...
+        // 新的 goroutine 结束的时候通过一个 finish 通道告知父 goroutine
+    finish <- struct{}{}
+}(）
+```
+现在第二步才算完成了，我们继续写第三步监听。使用 select 关键字来监听三个事件：异常事件、结束事件、超时事件。
+```go
+
+  select {
+    // 监听 panic
+  case p := <-panicChan:
+    ...
+        c.Json(500, "panic")
+    // 监听结束事件
+  case <-finish:
+    ...
+        fmt.Println("finish")
+    // 监听超时事件
+  case <-durationCtx.Done():
+    ...
+        c.Json(500, "time out")
+  }
+```
+接收到结束事件，只需要打印日志，但是，在接收到异常事件和超时事件的时候，我们希望告知浏览器前端“异常或者超时了”，所以会使用 c.Json 来返回一个字符串信息。
+
+三步走到这里就完成了对某个请求的超时设置，你可以通过 go build、go run 尝试启动下这个服务。如果你在浏览器开启一个请求之后，浏览器不会等候事件处理 10s，而在等待我们设置的超时事件 1s 后，页面显示“time out”就结束这个请求了，就说明我们为某个事件设置的超时生效了。
+
+#### 边界场景
+
+到这里，我们的超时逻辑设置就结束且生效了。但是，这样的代码逻辑只能算是及格，为什么这么说呢？因为它并没有覆盖所有的场景。我们的代码逻辑要再严谨一些，把边界场景也考虑进来。这里有两种可能：
+- 异常事件、超时事件触发时，需要往 responseWriter 中写入信息，这个时候如果有其他 Goroutine 也要操作 responseWriter，会不会导致 responseWriter 中的信息出现乱序？
+- 超时事件触发结束之后，已经往 responseWriter 中写入信息了，这个时候如果有其他 Goroutine 也要操作 responseWriter， 会不会导致 responseWriter 中的信息重复写入？
+
+你先分析第一个问题，是很有可能出现的。方案不难想到，我们要保证在事件处理结束之前，不允许任何其他 Goroutine 操作 responseWriter，这里可以使用一个锁（sync.Mutex）对 responseWriter 进行写保护。
+
+在框架文件夹的 context.go 中对 Context 结构进行一些设置：
+```go
+
+type Context struct {
+  // 写保护机制
+  writerMux  *sync.Mutex
+}
+
+// 对外暴露锁
+func (ctx *Context) WriterMux() *sync.Mutex {
+  return ctx.writerMux
+}
+```
+在刚才写的业务文件夹 controller.go 中也进行对应的修改：
+```go
+
+func FooControllerHandler(c *framework.Context) error {
+  ...
+    // 请求监听的时候增加锁机制
+  select {
+  case p := <-panicChan:
+    c.WriterMux().Lock()
+    defer c.WriterMux().Unlock()
+    ...
+    c.Json(500, "panic")
+  case <-finish:
+        ...
+    fmt.Println("finish")
+  case <-durationCtx.Done():
+    c.WriterMux().Lock()
+    defer c.WriterMux().Unlock()
+    c.Json(500, "time out")
+    c.SetTimeout()
+  }
+  return nil
+}
+```
+那第二个问题怎么处理，我提供一个方案。我们可以设计一个标记，当发生超时的时候，设置标记位为 true，在 Context 提供的 response 输出函数中，先读取标记位；当标记位为 true，表示已经有输出了，不需要再进行任何的 response 设置了。
+
+同样在框架文件夹中修改 context.go：
+```go
+
+type Context struct {
+    ...
+  // 是否超时标记位
+  hasTimeout bool
+  ...
+}
+
+func (ctx *Context) SetHasTimeout() {
+  ctx.hasTimeout = true
+}
+
+func (ctx *Context) Json(status int, obj interface{}) error {
+  if ctx.HasTimeout() {
+    return nil
+  }
+  ...
+}
+```
+在业务文件夹中修改 controller.go：
+```go
+
+func FooControllerHandler(c *framework.Context) error {
+  ...
+  select {
+  case p := <-panicChan:
+    ...
+  case <-finish:
+    fmt.Println("finish")
+  case <-durationCtx.Done():
+    c.WriterMux().Lock()
+    defer c.WriterMux().Unlock()
+    c.Json(500, "time out")
+        // 这里记得设置标记为
+    c.SetHasTimeout()
+  }
+  return nil
+}
+```
+好了，到了这里，我们就完成了请求超时设置，并且考虑了边界场景。剩下的验证部分，我们写一个简单的路由函数，将这个控制器路由在业务文件夹中创建一个 route.go:
+```go
+
+func registerRouter(core *framework.Core) {
+  // 设置控制器
+   core.Get("foo", FooControllerHandler)
+}
+```
+并修改 main.go：
+```go
+
+func main() {
+   ...
+   // 设置路由
+   registerRouter(core)
+   ...
+}
+```
+就可以运行了。完整代码照旧放在 GitHub 的 geekbang/02 分支上了。
+![](_images/4-12.jpg)
+
+#### 小结
+
+今天，我们定义了一个属于自己框架的 Context，它有两个功能：在各个 Goroutine 间传递数据；控制各个 Goroutine，也就是是超时控制。
+
+这个自定义 Context 结构封装了 net/http 标准库主逻辑流程产生的 Context，与主逻辑流程完美对接。它除了实现了标准库的 Context 接口，还封装了 request 和 response 的请求。你实现好了 Context 之后，就会发现它跟百宝箱一样，在处理具体的业务逻辑的时候，如果需要获取参数、设置返回值等，都可以通过 Context 获取。
+
+封装后，我们通过三步走为请求设置超时，并且完美地考虑了各种边界场景。
+
+你是不是觉得我们这一路要思考的点太多了，又是异常，又是边界场景。但是这里我要特别说明，其实真正要衡量框架的优劣，要看什么？就是看细节。
+
+所有框架的基本原理和基本思路都差不多，但是在细节方面，各个框架思考的程度是不一样的，才导致使用感天差地别。所以如果你想完成一个真正生产能用得上的框架，这些边界场景、异常分支，都要充分考虑清楚。
+
