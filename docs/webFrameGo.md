@@ -1131,3 +1131,809 @@ func (c *Core) Group(prefix string) IGroup {
   return NewGroup(c, prefix)
 }
 ```
+这个 Group 结构包含自身的前缀地址和 Core 结构的指针。它的 Get、Put、Post、Delete 方法就是把这个 Group 结构的前缀地址和目标地址组合起来，作为 Core 的 Request-URI 地址。
+
+接口是一种协议，它忽略具体的实现，定义的是两个逻辑结构的交互，因为两个函数之间定义的是一种约定，不依赖具体的实现。
+
+你可以这么判断：如果你觉得这个模块是完整的，而且后续希望有扩展的可能性，那么就应该尽量使用接口来替代实现。在代码中，多大程度使用接口进行逻辑结构的交互，是评价框架代码可扩展性的一个很好的标准。这种思维会贯穿在我们整个框架的设计中，后续我会时不时再提起的。
+
+所以回到我们的路由，使用 IGroup 接口后，core.Group 这个方法返回的是一个约定，而不依赖具体的 Group 实现。
+
+#### 实现动态路由匹配
+
+现在已经完成了前三个需求，下面我们考虑第四个需求，希望在写业务的时候能支持像下列这种动态路由：
+```go
+
+func registerRouter(core *framework.Core) {
+  // 需求1+2:HTTP方法+静态路由匹配
+  core.Get("/user/login", UserLoginController)
+
+  // 需求3:批量通用前缀
+  subjectApi := core.Group("/subject")
+  {
+    // 需求4:动态路由
+    subjectApi.Delete("/:id", SubjectDelController)
+    subjectApi.Put("/:id", SubjectUpdateController)
+    subjectApi.Get("/:id", SubjectGetController)
+    subjectApi.Get("/list/all", SubjectListController)
+  }
+}
+```
+首先，你要知道的是，一旦引入了动态路由匹配的规则，之前使用的哈希规则就无法使用了。因为有通配符，在匹配 Request-URI 的时候，请求 URI 的某个字符或者某些字符是动态变化的，无法使用 URI 做为 key 来匹配。那么，我们就需要其他的算法来支持路由匹配。
+
+如果你对算法比较熟悉，会联想到<u>这个问题本质是一个字符串匹配，而字符串匹配，比较通用的高效方法就是字典树，也叫 trie 树。</u>
+
+这里，我们先简单梳理下 trie 树的数据结构。trie 树不同于二叉树，它是多叉的树形结构，根节点一般是空字符串，而叶子节点保存的通常是字符串，一个节点的所有子孙节点都有相同的字符串前缀。
+
+所以根据 trie 树的特性，我们结合前三条路由规则，可以构建出这样的结构：
+```go
+
+1 /user/login
+2 /user/logout
+3 /subject/name
+4 /subject/name/age
+5 /subject/:id/name
+```
+画成图更清晰一些：
+![](_images/4-16.jpg)
+
+这个 trie 树是按照路由地址的每个段 (segment) 来切分的，每个 segment 在 trie 树中都能找到对应节点，每个节点保存一个 segment。树中，每个叶子节点都代表一个 URI，对于中间节点来说，有的中间节点代表一个 URI（比如上图中的 /subject/name），而有的中间节点并不是一个 URI（因为没有路由规则对应这个 URI）
+
+现在分析清楚了，我们开始动手实现 trie 树。还是照旧先明确下可以分为几步：
+- 定义树和节点的数据结构
+- 编写函数：“增加路由规则”
+- 编写函数：“查找路由”
+- 将“增加路由规则”和“查找路由”添加到框架中
+
+步骤非常清晰，好，废话不多说，我们一步一步来，首先定义对应的数据结构（node 和 tree）。先在框架文件夹下创建 tree.go 文件，存储 trie 树相关逻辑：
+```go
+
+// 代表树结构
+type Tree struct {
+  root *node // 根节点
+}
+
+// 代表节点
+type node struct {
+  isLast  bool              // 代表这个节点是否可以成为最终的路由规则。该节点是否能成为一个独立的uri, 是否自身就是一个终极节点
+  segment string            // uri中的字符串，代表这个节点表示的路由中某个段的字符串
+  handler ControllerHandler // 代表这个节点中包含的控制器，用于最终加载调用
+  childs  []*node           // 代表这个节点下的子节点
+}
+```
+Tree 结构中包含一个根节点，只是这个根节点是一个没有 segment 的空的根节点。
+
+node 的结构定义了四个字段。childs 字段让 node 组成了一个树形结构，handler 是具体的业务控制器逻辑存放位置，segment 是树中的这个节点存放的内容，isLast 用于区别这个树中的节点是否有实际的路由含义。
+
+有了数据结构后，第二步，我们就往 Tree 这个 trie 树结构中增加“路由规则”的逻辑。写之前，我们还是暂停一下想一想，会不会出现问题。之前提过会存在通配符，那直接加规则其实是有可能冲突的。比如：
+```go
+/user/name
+/user/:id
+```
+这两个路由规则实际上就冲突了，如果请求地址是 /user/name，那么两个规则都匹配，无法确定哪个规则生效。所以在增加路由之前，我们需要判断这个路由规则是否已经在 trie 树中存在了。
+
+这里，我们可以用 matchNode 方法，寻找某个路由在 trie 树中匹配的节点，如果有匹配节点，返回节点指针，否则返回 nil。matchNode 方法的参数是一个 URI，返回值是指向 node 的指针，它的实现思路是使用函数递归，我简单说明一下思路：
+
+首先，将需要匹配的 URI 根据第一个分隔符 / 进行分割，只需要最多分割成为两个段。如果只能分割成一个段，说明 URI 中没有分隔符了，这时候再检查下一级节点中是否有匹配这个段的节点就行。
+
+如果分割成了两个段，我们用第一个段来检查下一个级节点中是否有匹配这个段的节点。
+- 如果没有，说明这个路由规则在树中匹配不到。
+- 如果下一级节点中有符合第一个分割段的（这里需要注意可能不止一个符合），我们就将所有符合的节点进行函数递归，重新应用于 matchNode 函数中，只不过这时候 matchNode 函数作用于子节点，参数变成了切割后的第二个段。
+
+好思路就讲完了，整个流程里，会频繁使用到“过滤下一层满足 segment 规则的子节点” ，所以我们也用一个函数 filterChildNodes 将它封装起来。这个函数的逻辑就比较简单了：遍历下一层子节点，判断 segment 是否匹配传入的参数 segment。
+
+在框架文件夹中的 tree.go 中，我们完成 matchNode 和 filterChildNodes 完整代码实现，放在这里了，具体逻辑我也加了详细的批注帮你理解。
+```go
+
+// 判断一个segment是否是通用segment，即以:开头
+func isWildSegment(segment string) bool {
+  return strings.HasPrefix(segment, ":")
+}
+
+// 过滤下一层满足segment规则的子节点
+func (n *node) filterChildNodes(segment string) []*node {
+  if len(n.childs) == 0 {
+    return nil
+  }
+
+  // 如果segment是通配符，则所有下一层子节点都满足需求
+  if isWildSegment(segment) {
+    return n.childs
+  }
+
+  nodes := make([]*node, 0, len(n.childs))
+  // 过滤所有的下一层子节点
+  for _, cnode := range n.childs {
+    if isWildSegment(cnode.segment) {
+      // 如果下一层子节点有通配符，则满足需求
+      nodes = append(nodes, cnode)
+    } else if cnode.segment == segment {
+      // 如果下一层子节点没有通配符，但是文本完全匹配，则满足需求
+      nodes = append(nodes, cnode)
+    }
+  }
+
+  return nodes
+}
+
+// 判断路由是否已经在节点的所有子节点树中存在了
+func (n *node) matchNode(uri string) *node {
+  // 使用分隔符将uri切割为两个部分
+  segments := strings.SplitN(uri, "/", 2)
+  // 第一个部分用于匹配下一层子节点
+  segment := segments[0]
+  if !isWildSegment(segment) {
+    segment = strings.ToUpper(segment)
+  }
+  // 匹配符合的下一层子节点
+  cnodes := n.filterChildNodes(segment)
+  // 如果当前子节点没有一个符合，那么说明这个uri一定是之前不存在, 直接返回nil
+  if cnodes == nil || len(cnodes) == 0 {
+    return nil
+  }
+
+  // 如果只有一个segment，则是最后一个标记
+  if len(segments) == 1 {
+    // 如果segment已经是最后一个节点，判断这些cnode是否有isLast标志
+    for _, tn := range cnodes {
+      if tn.isLast {
+        return tn
+      }
+    }
+
+    // 都不是最后一个节点
+    return nil
+  }
+
+  // 如果有2个segment, 递归每个子节点继续进行查找
+  for _, tn := range cnodes {
+    tnMatch := tn.matchNode(segments[1])
+    if tnMatch != nil {
+      return tnMatch
+    }
+  }
+  return nil
+}
+```
+现在有了 matchNode 和 filterChildNodes 函数，我们就可以开始写第二步里最核心的增加路由的函数逻辑了。
+
+首先，确认路由是否冲突。我们先检查要增加的路由规则是否在树中已经有可以匹配的节点了。如果有的话，代表当前待增加的路由和已有路由存在冲突，这里我们用到了刚刚定义的 matchNode。更新刚才框架文件夹中的 tree.go 文件：
+```go
+// 增加路由节点
+func (tree *Tree) AddRouter(uri string, handler ControllerHandler) error {
+  n := tree.root
+    // 确认路由是否冲突
+  if n.matchNode(uri) != nil {
+    return errors.New("route exist: " + uri)
+  }
+
+  ...
+}
+```
+然后继续增加路由规则。我们增加路由的每个段时，先去树的每一层中匹配查找，如果已经有了符合这个段的节点，就不需要创建节点，继续匹配待增加路由的下个段；否则，需要创建一个新的节点用来代表这个段。这里，我们用到了定义的 filterChildNodes。
+```go
+
+// 增加路由节点
+/*
+/book/list
+/book/:id (冲突)
+/book/:id/name
+/book/:student/age
+/:user/name
+/:user/name/:age(冲突)
+*/
+func (tree *Tree) AddRouter(uri string, handler ControllerHandler) error {
+  n := tree.root
+  if n.matchNode(uri) != nil {
+    return errors.New("route exist: " + uri)
+  }
+
+  segments := strings.Split(uri, "/")
+  // 对每个segment
+  for index, segment := range segments {
+
+    // 最终进入Node segment的字段
+    if !isWildSegment(segment) {
+      segment = strings.ToUpper(segment)
+    }
+    isLast := index == len(segments)-1
+
+    var objNode *node // 标记是否有合适的子节点
+
+    childNodes := n.filterChildNodes(segment)
+    // 如果有匹配的子节点
+    if len(childNodes) > 0 {
+      // 如果有segment相同的子节点，则选择这个子节点
+      for _, cnode := range childNodes {
+        if cnode.segment == segment {
+          objNode = cnode
+          break
+        }
+      }
+    }
+
+    if objNode == nil {
+      // 创建一个当前node的节点
+      cnode := newNode()
+      cnode.segment = segment
+      if isLast {
+        cnode.isLast = true
+        cnode.handler = handler
+      }
+      n.childs = append(n.childs, cnode)
+      objNode = cnode
+    }
+
+    n = objNode
+  }
+
+  return nil
+}
+```
+到这里，第二步增加路由的规则逻辑已经有了，我们要开始第三步，编写“查找路由”的逻辑。这里你会发现，由于我们之前已经定义过 matchNode（匹配路由节点），所以这里只需要复用这个函数就行了。
+```go
+
+// 匹配uri
+func (tree *Tree) FindHandler(uri string) ControllerHandler {
+    // 直接复用matchNode函数，uri是不带通配符的地址
+  matchNode := tree.root.matchNode(uri)
+  if matchNode == nil {
+    return nil
+  }
+  return matchNode.handler
+}
+
+```
+前三步已经完成了，最后一步，我们把“增加路由规则”和“查找路由”添加到框架中。还记得吗，在静态路由匹配的时候，在 Core 中使用哈希定义的路由，这里将哈希替换为 trie 树。还是在框架文件夹中的 core.go 文件，找到对应位置作修改：
+```go
+
+type Core struct {
+  router map[string]*Tree // all routers
+}
+```
+对应路由增加的方法，也从哈希的增加逻辑，替换为 trie 树的“增加路由规则”逻辑。同样更新 core.go 文件中的下列方法：
+```go
+
+// 初始化Core结构
+func NewCore() *Core {
+  // 初始化路由
+  router := map[string]*Tree{}
+  router["GET"] = NewTree()
+  router["POST"] = NewTree()
+  router["PUT"] = NewTree()
+  router["DELETE"] = NewTree()
+  return &Core{router: router}
+}
+
+
+
+// 匹配GET 方法, 增加路由规则
+func (c *Core) Get(url string, handler ControllerHandler) {
+  if err := c.router["GET"].AddRouter(url, handler); err != nil {
+    log.Fatal("add router error: ", err)
+  }
+}
+
+// 匹配POST 方法, 增加路由规则
+func (c *Core) Post(url string, handler ControllerHandler) {
+  if err := c.router["POST"].AddRouter(url, handler); err != nil {
+    log.Fatal("add router error: ", err)
+  }
+}
+
+// 匹配PUT 方法, 增加路由规则
+func (c *Core) Put(url string, handler ControllerHandler) {
+  if err := c.router["PUT"].AddRouter(url, handler); err != nil {
+    log.Fatal("add router error: ", err)
+  }
+}
+
+// 匹配DELETE 方法, 增加路由规则
+func (c *Core) Delete(url string, handler ControllerHandler) {
+  if err := c.router["DELETE"].AddRouter(url, handler); err != nil {
+    log.Fatal("add router error: ", err)
+  }
+}
+```
+之前在 Core 中定义的匹配路由函数的实现逻辑，从哈希匹配修改为 trie 树匹配就可以了。继续更新 core.go 文件：
+```go
+
+// 匹配路由，如果没有匹配到，返回nil
+func (c *Core) FindRouteByRequest(request *http.Request) ControllerHandler {
+  // uri 和 method 全部转换为大写，保证大小写不敏感
+  uri := request.URL.Path
+  method := request.Method
+  upperMethod := strings.ToUpper(method)
+
+  // 查找第一层map
+  if methodHandlers, ok := c.router[upperMethod]; ok {
+    return methodHandlers.FindHandler(uri)
+  }
+  return nil
+}
+
+```
+动态匹配规则就改造完成了。
+
+#### 验证
+
+现在，四个需求都已经实现了。我们验证一下：定义包含有静态路由、批量通用前缀、动态路由的路由规则，每个控制器我们就直接输出控制器的名字，然后启动服务。
+
+这个时候我们就可以去修改业务文件夹下的路由文件 route.go：
+```go
+
+// 注册路由规则
+func registerRouter(core *framework.Core) {
+  // 需求1+2:HTTP方法+静态路由匹配
+  core.Get("/user/login", UserLoginController)
+
+  // 需求3:批量通用前缀
+  subjectApi := core.Group("/subject")
+  {
+    // 需求4:动态路由
+    subjectApi.Delete("/:id", SubjectDelController)
+    subjectApi.Put("/:id", SubjectUpdateController)
+    subjectApi.Get("/:id", SubjectGetController)
+    subjectApi.Get("/list/all", SubjectListController)
+  }
+}
+```
+同时在业务文件夹下创建对应的业务控制器 user_controller.go 和 subject_controller.go。具体里面的逻辑代码就是打印出对应的控制器名字，比如
+```go
+
+func UserLoginController(c *framework.Context) error {
+   // 打印控制器名字
+   c.Json(200, "ok, UserLoginController")
+   return nil
+}
+```
+来看服务启动情况：访问地址 /user/login 匹配路由 UserLoginContorller。
+![](_images/4-17.jpg)
+
+访问地址 /subject/list/all 匹配路由 SubjectListController。访问地址 /subject/100 匹配动态路由 SubjectGetController。
+
+今天的文件及代码结构如下，新建的文件夹多一点你可以对照着 GitHub 再看看，代码地址在[geekbang/03](https://github.com/gohade/coredemo/tree/geekbang/03)分支上：
+
+#### 小结
+
+在这一讲，我们一步步实现了满足四个需求的路由：HTTP 方法匹配、批量通用前缀、静态路由匹配和动态路由匹配。
+
+我们使用 IGroup 结构和在 Core 中定义 key 为方法的路由，实现了 HTTP 方法匹配、批量通用前缀这两个需求，并且用哈希来实现静态路由匹配，之后我们使用 trie 树算法替代哈希算法，实现了动态路由匹配的需求
+
+所以，你有没有发现，其实所谓的实现功能，写代码只是其中一小部分，如何思考、如何考虑容错性、扩展性和复用性，这个反而是更大的部分。
+
+以今天实现的路由这个功能为例，你是否考虑到了 URI 的容错性，在 Group 返回时候是否使用接口增加扩展性，在实现动态匹配的时候是否考虑函数复用性。我们要记住的是，思路比代码实现更重要。
+
+### 4.中间件：如何提高框架的可拓展性
+
+到目前为止我们已经完成了 Web 框架的基础部分，使用 net/http 启动了一个 Web 服务，并且定义了自己的 Context，可以控制请求超时。
+
+之前在讲具体实现的时候，我们反复强调要注意代码的优化。那么如何优化呢？具体来说，很重要的一点就是封装。所以今天我们就回顾一下之前写的代码，看看如何通过封装来进一步提高代码扩展性。
+
+在第二课，我们在业务文件夹中的 controller.go 的逻辑中设置了一个有超时时长的控制器：
+```go
+
+func FooControllerHandler(c *framework.Context) error {
+  ...
+    // 在业务逻辑处理前，创建有定时器功能的 context
+  durationCtx, cancel := context.WithTimeout(c.BaseContext(), time.Duration(1*time.Second))
+  defer cancel()
+
+  go func() {
+    ...
+    // 执行具体的业务逻辑
+        
+    time.Sleep(10 * time.Second)
+        // ...
+              
+    finish <- struct{}{}
+  }()
+  // 在业务逻辑处理后，操作输出逻辑...
+    select {
+  ...
+  case <-finish:
+    fmt.Println("finish")
+  ...
+  }
+  return nil
+}
+```
+在正式执行业务逻辑之前，创建了一个具有定时器功能的 Context，然后开启一个 Goroutine 执行正式的业务逻辑，并且监听定时器和业务逻辑，哪个先完成，就先输出内容。
+
+首先从代码功能分析，这个控制器像由两部分组成。
+
+一部分是业务逻辑，也就是 time.Sleep 函数所代表的逻辑，在实际生产过程中，这里会有很重的业务逻辑代码；而另一部分是非业务逻辑，比如创建 Context、通道等待 finish 信号等。很明显，这个非业务逻辑是非常通用的需求，可能在多个控制器中都会使用到。
+
+而且考虑复用性，这里只是写了一个控制器，那如果有多个控制器呢，我们难道要为每个控制器都写上这么一段超时代码吗？那就非常冗余了。
+
+所以，能不能设计一个机制，<u>将这些非业务逻辑代码抽象出来，封装好，提供接口给控制器使用。这个机制的实现，就是我们今天要讲的中间件。</u>
+
+怎么实现这个中间件呢？我们再观察一下刚才的代码找找思路。
+
+代码的组织顺序很清晰，先预处理请求，再处理业务逻辑，最后处理返回值，你发现没有这种顺序，其实很符合设计模式中的装饰器模式。装饰器模式，顾名思义，就是在核心处理模块的外层增加一个又一个的装饰，类似洋葱。
+
+现在，抽象出中间件的思路是不是就很清晰了，<u>把核心业务逻辑先封装起来，然后一层一层添加装饰，最终让所有请求正序一层层通过装饰器，进入核心处理模块，再反序退出装饰器。原理就是这么简单，不难理解，我们接着看该如何实现。</u>
+
+#### 使用函数嵌套方式实现中间件
+
+装饰器模式是一层一层的，所以具体实现其实也不难想到，就是使用函数嵌套。
+
+首先，我们封装核心的业务逻辑。就是说，这个中间件的输入是一个核心的业务逻辑 ControllerHandler，输出也应该是一个 ControllerHandler。所以<u>对于一个超时控制器，我们可以定义一个中间件为 TimeoutHandler。</u>
+
+在框架文件夹中，我们创建一个 timeout.go 文件来存放这个中间件。
+```go
+
+func TimeoutHandler(fun ControllerHandler, d time.Duration) ControllerHandler {
+  // 使用函数回调
+  return func(c *Context) error {
+
+    finish := make(chan struct{}, 1)
+    panicChan := make(chan interface{}, 1)
+
+    // 执行业务逻辑前预操作：初始化超时 context
+    durationCtx, cancel := context.WithTimeout(c.BaseContext(), d)
+    defer cancel()
+
+    c.request.WithContext(durationCtx)
+
+    go func() {
+      defer func() {
+        if p := recover(); p != nil {
+          panicChan <- p
+        }
+      }()
+      // 执行具体的业务逻辑
+      fun(c)
+
+      finish <- struct{}{}
+    }()
+    // 执行业务逻辑后操作
+    select {
+    case p := <-panicChan:
+      log.Println(p)
+      c.responseWriter.WriteHeader(500)
+    case <-finish:
+      fmt.Println("finish")
+    case <-durationCtx.Done():
+      c.SetHasTimeout()
+      c.responseWriter.Write([]byte("time out"))
+    }
+    return nil
+  }
+}
+```
+
+仔细看下这段代码，中间件函数的返回值是一个匿名函数，这个匿名函数实现了 ControllerHandler 函数结构，参数为 Context，返回值为 error。
+
+在这个匿名函数中，我们先创建了一个定时器 Context，然后开启一个 Goroutine，在 Goroutine 中执行具体的业务逻辑。这个 Goroutine 会在业务逻辑执行结束后，通过一个 finish 的 channel 来传递结束信号；也会在业务出现异常的时候，通过 panicChan 来传递异常信号。
+
+而在业务逻辑之外的主 Goroutine 中，会同时进行多个信号的监听操作，包括结束信号、异常信号、超时信号，耗时最短的信号到达后，请求结束。这样，我们就完成了设置业务超时的任务。
+
+于是在业务文件夹 route.go 中，路由注册就可以修改为:
+```go
+
+// 在核心业务逻辑 UserLoginController 之外，封装一层 TimeoutHandler
+core.Get("/user/login", framework.TimeoutHandler(UserLoginController, time.Second))
+```
+这种函数嵌套方式，让下层中间件是上层中间件的参数，通过一层层嵌套实现了中间件的装饰器模式。
+
+但是你再想一步，就会发现，这样实现的中间件机制有两个问题：
+
+1. 中间件是循环嵌套的，当有多个中间件的时候，整个嵌套长度就会非常长，非常不优雅的，比如：
+```go
+TimeoutHandler(LogHandler(recoveryHandler(UserLoginController)))
+```
+2. 刚才的实现，只能为单个业务控制器设置中间件，不能批量设置。上一课我们开发的路由是具有同前缀分组功能的（IGroup），需要批量为某个分组设置一个超时时长。
+
+所以，我们要对刚才实现的简单中间件代码做一些改进。怎么做呢？
+
+#### 使用 pipeline 思想改造中间件
+
+一层层嵌套不好用，如果我们将每个核心控制器所需要的中间件，使用一个数组链接（Chain）起来，形成一条流水线（Pipeline），就能完美解决这两个问题了。
+
+请求流的流向如下图所示：
+![](_images/4-18.jpg)
+这个 Pipeline 模型和前面的洋葱模型不一样的点在于，<u>Middleware 不再以下一层的 ControllerHandler 为参数了，它只需要返回有自身中间件逻辑的 ControllerHandler。</u>
+
+也就是在框架文件夹中的 timeout.go 中，我们将 Middleware 的形式从刚才的：
+```go
+func TimeoutHandler(fun ControllerHandler, d time.Duration) ControllerHandler {
+  // 使用函数回调
+  return func(c *Context) error {
+   //...
+    }
+}
+```
+变成这样：
+```go
+// 超时控制器参数中ControllerHandler结构已经去掉
+func Timeout(d time.Duration) framework.ControllerHandler {
+  // 使用函数回调
+  return func(c *framework.Context) error {
+      //...
+    }
+}
+```
+但是在中间件注册的回调函数中，如何调用下一个 ControllerHandler 呢？在回调函数中，只有 framework.Context 这个数据结构作为参数。
+
+所以就需要我们在 Context 这个数据结构中想一些办法了。回顾下目前有的数据结构：Core、Context、Tree、Node、Group。
+![](_images/4-19.jpg)
+
+它们基本上都是以 Core 为中心，在 Core 中设置路由 router，实现了 Tree 结构，在 Tree 结构中包含路由节点 node；在注册路由的时候，将对应的业务核心处理逻辑 handler ，放在 node 结构的 handler 属性中。
+
+而 Core 中的 ServeHttp 方法会创建 Context 数据结构，然后 ServeHttp 方法再根据 Request-URI 查找指定 node，并且将 Context 结构和 node 中的控制器 ControllerHandler 结合起来执行具体的业务逻辑。
+
+结构都梳理清楚了，怎么改造成流水线呢？
+
+<u>我们可以将每个中间件构造出来的 ControllerHandler 和最终的业务逻辑的 ControllerHandler 结合在一起，成为一个 ControllerHandler 数组，也就是控制器链。在最终执行业务代码的时候，能一个个调用控制器链路上的控制器。</u>
+
+这个想法其实是非常自然的，因为中间件中创造出来的 ControllerHandler 匿名函数，和最终的控制器业务逻辑 ControllerHandler，都是同样的结构，所以我们可以选用 Controllerhander 的数组，来表示某个路由的业务逻辑。
+
+对应到代码上，我们先搞清楚使用链路的方式，再看如何注册和构造链路。
+
+#### 如何使用控制器链路
+
+首先，我们研究下如何使用这个控制器链路，即图中右边部分的改造。
+![](_images/4-20.jpg)
+
+第一步，我们需要修改路由节点 node。
+
+在 node 节点中将原先的 Handler，替换为控制器链路 Handlers。这样在寻找路由节点的时候，就能找到对应的控制器链路了。修改框架文件夹中存放 trie 树的 trie.go 文件：
+```go
+
+// 代表节点
+type node struct {
+  ...
+  handlers []ControllerHandler // 中间件+控制器 
+    ...
+}
+
+```
+第二步，我们修改 Context 结构。
+
+由于我们上文提到，在中间件注册的回调函数中，只有 framework.Context 这个数据结构作为参数，所以在 Context 中也需要保存这个控制器链路 (handlers)，并且要记录下当前执行到了哪个控制器（index）。修改框架文件夹的 context.go 文件：
+```go
+
+// Context代表当前请求上下文
+type Context struct {
+  ...
+
+  // 当前请求的handler链条
+  handlers []ControllerHandler
+  index    int // 当前请求调用到调用链的哪个节点
+}
+```
+第三步，来实现链条调用方式。
+
+为了控制实现链条的逐步调用，我们为 Context 实现一个 Next 方法。这个 Next 方法每调用一次，就将这个控制器链路的调用控制器，往后移动一步。继续在框架文件夹中的 context.go 文件里写：
+```go
+
+// 核心函数，调用context的下一个函数
+func (ctx *Context) Next() error {
+  ctx.index++
+  if ctx.index < len(ctx.handlers) {
+    if err := ctx.handlers[ctx.index](ctx); err != nil {
+      return err
+    }
+  }
+  return nil
+}
+```
+这里我再啰嗦一下，Next() 函数是整个链路执行的重点，要好好理解，它通过维护 Context 中的一个下标，来控制链路移动，这个下标表示当前调用 Next 要执行的控制器序列。
+
+Next() 函数会在框架的两个地方被调用：
+- 第一个是在此次请求处理的入口处，即 Core 的 ServeHttp；
+- 第二个是在每个中间件的逻辑代码中，用于调用下个中间件。
+
+![](_images/4-21.jpg)
+
+这里要注意，index 下标表示当前调用 Next 要执行的控制器序列，它的初始值应该为 -1，每次调用都会自增 1，这样才能保证第一次调用的时候 index 为 0，定位到控制器链条的下标为 0 的控制器，即第一个控制器。
+
+在框架文件夹 context.go 的初始化 Context 函数中，代码如下：
+```go
+
+// NewContext 初始化一个Context
+func NewContext(r *http.Request, w http.ResponseWriter) *Context {
+  return &Context{
+    ...
+    index:          -1,
+  }
+}
+```
+被调用的第一个地方，在入口处调用的代码，写在框架文件夹中的 core.go 文件中：
+```go
+
+// 所有请求都进入这个函数, 这个函数负责路由分发
+func (c *Core) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+
+  // 封装自定义context
+  ctx := NewContext(request, response)
+
+  // 寻找路由
+  handlers := c.FindRouteByRequest(request)
+  if handlers == nil {
+    // 如果没有找到，这里打印日志
+    ctx.Json(404, "not found")
+    return
+  }
+
+    // 设置context中的handlers字段
+  ctx.SetHandlers(handlers)
+
+  // 调用路由函数，如果返回err 代表存在内部错误，返回500状态码
+  if err := ctx.Next(); err != nil {
+    ctx.Json(500, "inner error")
+    return
+  }
+}
+```
+被调用的第二个位置在中间件中，每个中间件都通过调用 context.Next 来调用下一个中间件。所以我们可以在框架文件夹中创建 middleware 目录，其中创建一个 test.go 存放我们的测试中间件：
+```go
+
+func Test1() framework.ControllerHandler {
+  // 使用函数回调
+  return func(c *framework.Context) error {
+    fmt.Println("middleware pre test1")
+    c.Next()  // 调用Next往下调用，会自增contxt.index
+    fmt.Println("middleware post test1")
+    return nil
+  }
+}
+
+func Test2() framework.ControllerHandler {
+  // 使用函数回调
+  return func(c *framework.Context) error {
+    fmt.Println("middleware pre test2")
+    c.Next() // 调用Next往下调用，会自增contxt.index
+    fmt.Println("middleware post test2")
+    return nil
+  }
+}
+
+```
+
+#### 如何注册控制器链路
+
+如何使用控制器链路，我们就讲完了，再看控制器链路如何注册，就是之前 UML 图的左边部分。
+![](_images/4-22.jpg)
+
+很明显，现有的函数没有包含注册中间件逻辑，所以我们需要为 Group 和 Core 两个结构增加注册中间件入口，要设计两个地方：
+- Core 和 Group 单独设计一个 Use 函数，为其数据结构负责的路由批量设置中间件
+- 为 Core 和 Group 注册单个路由的 Get / Post / Put / Delete 函数，设置中间件
+
+先看下批量设置中间件的 Use 函数，我们在框架文件夹中的 core.go 修改：
+```go
+// 注册中间件
+func (c *Core) Use(middlewares ...ControllerHandler) {
+   c.middlewares = append(c.middlewares, middlewares...)
+}
+```
+和框架文件夹中的 group.go 中修改：
+```go
+// 注册中间件
+func (g *Group) Use(middlewares ...ControllerHandler) {
+   g.middlewares = append(g.middlewares, middlewares...)
+}
+```
+注意下这里的参数，使用的是 Golang 的可变参数，这个可变参数代表，我可以传递 0～n 个 ControllerHandler 类型的参数，这个设计会增加函数的易用性。它在业务文件夹中使用起来的形式是这样的，在 main.go 中：
+```go
+
+// core中使用use注册中间件
+core.Use(
+    middleware.Test1(),
+    middleware.Test2())
+
+// group中使用use注册中间件
+subjectApi := core.Group("/subject")
+subjectApi.Use(middleware.Test3())
+```
+再看单个路由设置中间件的函数，我们也使用可变参数，改造注册路由的函数（Get /Post /Delete /Put），继续在框架文件夹中的 core.go 里修改：
+```go
+
+// Core的Get方法进行改造
+func (c *Core) Get(url string, handlers ...ControllerHandler) {
+  // 将core的middleware 和 handlers结合起来
+  allHandlers := append(c.middlewares, handlers...)
+  if err := c.router["GET"].AddRouter(url, allHandlers); err != nil {
+    log.Fatal("add router error: ", err)
+  }
+}
+... 
+```
+同时修改框架文件夹中的 group.go：
+```go
+
+// 改造IGroup 的所有方法
+type IGroup interface {
+  // 实现HttpMethod方法
+  Get(string, ...ControllerHandler)
+  Post(string, ...ControllerHandler)
+  Put(string, ...ControllerHandler)
+  Delete(string, ...ControllerHandler)
+    //..
+}
+
+// 改造Group的Get方法
+func (g *Group) Get(uri string, handlers ...ControllerHandler) {
+  uri = g.getAbsolutePrefix() + uri
+  allHandlers := append(g.getMiddlewares(), handlers...)
+  g.core.Get(uri, allHandlers...)
+}
+
+...
+```
+这样，回到业务文件夹中的 router.go，我们注册路由的使用方法就可以变成如下形式：
+```go
+
+// 注册路由规则
+func registerRouter(core *framework.Core) {
+  // 在core中使用middleware.Test3() 为单个路由增加中间件
+  core.Get("/user/login", middleware.Test3(), UserLoginController)
+
+  // 批量通用前缀
+  subjectApi := core.Group("/subject")
+  {
+        ...
+        // 在group中使用middleware.Test3() 为单个路由增加中间件
+    subjectApi.Get("/:id", middleware.Test3(), SubjectGetController)
+  }
+}
+```
+不管是通过批量注册中间件，还是单个注册中间件，最终都要汇总到路由节点 node 中，所以这里我们调用了上一节课最终增加路由的函数 Tree.AddRouter，把将这个请求对应的 Core 结构里的中间件和 Group 结构里的中间件，都聚合起来，成为最终路由节点的中间件。
+
+聚合的逻辑在 group.go 和 core.go 中都有，<u>实际上就是将 Handler 和 Middleware 一起放在一个数组中。</u>
+```go
+
+// 获取某个group的middleware
+// 这里就是获取除了Get/Post/Put/Delete之外设置的middleware
+func (g *Group) getMiddlewares() []ControllerHandler {
+  if g.parent == nil {
+    return g.middlewares
+  }
+
+  return append(g.parent.getMiddlewares(), g.middlewares...)
+}
+
+// 实现Get方法
+func (g *Group) Get(uri string, handlers ...ControllerHandler) {
+  uri = g.getAbsolutePrefix() + uri
+  allHandlers := append(g.getMiddlewares(), handlers...)
+  g.core.Get(uri, allHandlers...)
+}
+```
+在 core.go 文件夹里写：
+```go
+
+// 匹配GET 方法, 增加路由规则
+func (c *Core) Get(url string, handlers ...ControllerHandler) {
+  // 将core的middleware 和 handlers结合起来
+  allHandlers := append(c.middlewares, handlers...)
+  if err := c.router["GET"].AddRouter(url, allHandlers); err != nil {
+    log.Fatal("add router error: ", err)
+  }
+}
+
+```
+到这里，我们使用 pipeline 思想对中间件的改造就完成了, 最终的 UML 类图如下：
+![](_images/4-23.jpg)
+
+让我们简要回顾下改造过程。
+
+第一步使用控制器链路，我们<u>改造了 node 和 Context 两个数据结构。</u>为 node 增加了 handlers，存放这个路由注册的所有中间件；Context 也增加了 handlers，在 Core.ServeHttp 的函数中，创建 Context 结构，寻找到请求对应的路由节点，然后把路由节点的 handlers 数组，复制到 Context 中的 handlers。
+
+为了实现真正的链路调用，需要在框架的<u>两个地方调用 Context.Next() 方法，一个是启动业务逻辑的地方，一个是每个中间件的调用。</u>
+
+第二步如何注册控制器链路，我们<u>改造了 Group 和 Core 两个数据结构，为它们增加了注册中间件的入口，</u>一处是批量增加中间件函数 Use，一处是在注册单个路由的 Get / Post / Delete / Put 方法中，为单个路由设置中间件。在设计入口的时候，我们使用了可变参数的设计，提高注册入口的可用性。
+
+#### 基本的中间件: Recovery
+
+我们现在已经将中间件机制搭建并运行起来了， 但是具体需要实现哪些中间件呢？这要根据不同需求进行不同的研发，是个长期话题。
+
+这里我们演示一个最基本的中间件：Recovery。
+
+中间件那么多，比如超时中间件、统计中间件、日志中间件，为什么我说 Recovery 是最基本的呢？给出我的想法之前，你可以先思考这个问题：在编写业务核心逻辑的时候，如果出现了一个 panic，而且在业务核心逻辑函数中未捕获处理，会发生什么？
+
+我们还是基于第一节课讲的 net/http 的主流程逻辑来思考，关键结论有一点是，<u>每个 HTTP 连接都会开启一个 Goroutine 为其服务</u>，所以很明显， net/http 的进程模型是单进程、多协程。
+
+在 Golang 的这种模型中，每个协程是独立且平等的，即使是创建子协程的父协程，在 Goroutine 中也无法管理子协程。所以，<u>每个协程需要自己保证不会外抛 panic，</u>一旦外抛 panic 了，整个进程就认为出现异常，会终止进程。
+
