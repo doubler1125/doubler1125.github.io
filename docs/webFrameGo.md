@@ -32,6 +32,8 @@
 
 **学习路径**
 
+![](_images/4-0.jpg)
+
 - 实战第一关：我会带你分析 Web 框架的本质，从最底层的 Go 的 HTTP 库开始讲起，如何基于 HTTP 库建立 server、如何搭建路由、如何增加中间件等等，从而搭建出一个 Web 框架最核心的设计部分。
 - 实战第二关：框架核心搭建好了，我们会基于具体业务场景重新思考：设计框架的目标到底是什么? 框架的设计感和要解决的问题在哪里? 框架的倾向性是什么? 如果要搭建出一个“一切皆服务”的框架应该如何设计。
 - 实战第三关：我将带你为这个框架增加不同的周边功能，在添加功能时，我们会先讨论目前社区中的标准做法是什么样的，有没有更好的设计，最终把这些标准做法融合到我们的框架中。
@@ -825,3 +827,307 @@ func main() {
 
 所有框架的基本原理和基本思路都差不多，但是在细节方面，各个框架思考的程度是不一样的，才导致使用感天差地别。所以如果你想完成一个真正生产能用得上的框架，这些边界场景、异常分支，都要充分考虑清楚。
 
+### 3.路由：如何让请求更快寻找到目标函数？
+
+上一讲，我们封装了框架的 Context， 将请求结构 request 和返回结构 responseWriter 都封装在 Context 中。利用这个 Context， 我们将控制器简化为带有一个参数的函数 FooControllerHandler，这个控制器函数的输入和输出都是固定的。在框架层面，我们也定义了对应关于控制器的方法结构 ControllerHandler 来代表这类控制器的函数。
+
+每一个请求逻辑，都有一个控制器 ControllerHandler 与之对应。那么一个请求，如何查找到指定的控制器呢？这就是今天要研究的内容：路由，我将带你理解路由，并且实现一个高效、易用的路由模块
+
+#### 路由设计思路
+
+相信你对路由是干啥的已经有大致了解，具体来说就是让 Web 服务器根据规则，理解 HTTP 请求中的信息，匹配查找出对应的控制器，再将请求传递给控制器执行业务逻辑，<u>简单来说就是制定匹配规则。</u>
+![](_images/4-13.jpg)
+
+但是就是这么简单的功能，路由的设计感不同，可用性有天壤之别。为什么这么说呢，我们带着这个问题，先来梳理一下制定路由规则需要的信息。
+
+由可以使用 HTTP 请求体中的哪些信息，得回顾我们第一节课讲 HTTP 的内容。
+
+一个 HTTP 请求包含请求头和请求体。请求体内一般存放的是请求的业务数据，是基于具体控制业务需要的，所以，我们不会用来做路由。
+
+而请求头中存放的是和请求状态有关的信息，比如 User-Agent 代表的是请求的浏览器信息，Accept 代表的是支持返回的文本类型。以下是一个标准请求头的示例：
+```http
+GET /home.html HTTP/1.1
+Host: developer.mozilla.org
+User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10.9; rv:50.0) Gecko/20100101 Firefox/50.0
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 
+Accept-Language: en-US,en;q=0.5
+Accept-Encoding: gzip, deflate, br
+Referer: https://developer.mozilla.org/testpage.html
+```
+每一行的信息和含义都是非常大的课题，也与今天要讲的内容无关，我们这里要关注的是 HTTP 请求的第一行，叫做 Request Line，由三个部分组成：Method、Request-URI 和 HTTP-Version（[RFC2616](https://datatracker.ietf.org/doc/html/rfc2616)）。
+
+Method 是 HTTP 的方法，标识对服务端资源的操作属性。它包含多个方法，每个方法都代表不同的操作属性。
+```http
+
+       Method         = "OPTIONS"                ; Section 9.2
+                      | "GET"                    ; Section 9.3
+                      | "HEAD"                   ; Section 9.4
+                      | "POST"                   ; Section 9.5
+                      | "PUT"                    ; Section 9.6
+                      | "DELETE"                 ; Section 9.7
+                      | "TRACE"                  ; Section 9.8
+                      | "CONNECT"                ; Section 9.9
+                      | extension-method
+       extension-method = token
+```
+Request-URI 是请求路径，也就是浏览器请求地址中域名外的剩余部分。
+![](_images/4-14.jpg)
+
+HTTP-Version 是 HTTP 的协议版本，目前常见的有 1.0、1.1、2.0。
+
+Web Service 在路由中使用的就是 Method 和 Request-URI 这两个部分。了解制定路由规则时，请求体中可以使用的元素之后，我们再回答刚才的问题，什么是路由的设计感。
+
+<u>这里说的设计感指的是：框架设计者希望使用者如何用路由模块。</u>
+
+如果框架支持 REST 风格的路由设计，那么使用者在写业务代码的时候，就倾向于设计 REST 风格的接口；如果框架支持前缀匹配，那么使用者在定制 URI 的时候，也会倾向于把同类型的 URI 归为一类。
+
+这些设计想法通通会体现在框架的路由规则上，最终影响框架使用者的研发习惯，这个就是设计感。所以其实，设计感和框架设计者偏好的研发风格直接相关，也没有绝对的优劣。
+
+这里你很容易走入误区，我要说明一下。很多同学认为设计感的好坏体现在路由规则的多少上，其实不是。
+
+由规则，是根据路由来查找控制器的逻辑，它本身就是一个框架需求。我们可以天马行空设想 100 条路由规则，并且全部实现它，也可以只设计 1、2 个最简单的路由规则。很多或者很少的路由规则，都不会根本性影响使用者，所以，并不是衡量一个框架好坏的标准。
+
+#### 路由规则的需求
+
+按照从简单到复杂排序，路由需求我整理成下面四点：
+
+- 需求 1：HTTP 方法匹配
+
+早期的 WebService 比较简单，HTTP 请求体中的 Request Line 或许只会使用到 Request-URI 部分，但是随着 REST 风格 WebService 的流行，为了让 URI 更具可读性，在现在的路由输入中，HTTP Method 也是很重要的一部分了，所以，我们框架也需要支持多种 HTTP Method，比如 GET、POST、PUT、DELETE。
+
+- 需求 2：静态路由匹配
+
+静态路由匹配是一个路由的基本功能，指的是路由规则中没有可变参数，即路由规则地址是固定的，与 Request-URI 完全匹配。
+
+我们在第一讲中提到的 DefaultServerMux 这个路由器，从内部的 map 中直接根据 key 寻找 value ，这种查找路由的方式就是静态路由匹配。
+
+- 需求 3：批量通用前缀
+
+因为业务模块的划分，我们会同时为某个业务模块注册一批路由，所以在路由注册过程中，为了路由的可读性，一般习惯统一定义这批路由的通用前缀。比如 /user/info、/user/login 都是以 /user 开头，很方便使用者了解页面所属模块。
+
+所以如果路由有能力统一定义批量的通用前缀，那么在注册路由的过程中，会带来很大的便利。
+
+- 需求 4：动态路由匹配
+
+这个需求是针对需求 2 改进的，因为 URL 中某个字段或者某些字段并不是固定的，是按照一定规则（比如是数字）变化的。那么，我们希望路由也能够支持这个规则，将这个动态变化的路由 URL 匹配出来。所以我们需要，使用自己定义的路由来补充，只支持静态匹配的 DefaultServerMux 默认路由。
+
+现在四个最基本的需求我们已经整理出来了，接下来通过一个例子来解释下，比如我们需要能够支持一个日志网站的这些功能：
+
+接下来就是今天的重头戏了，要匹配这样的路由列表，路由规则定义代码怎么写呢？我把最终的使用代码贴在这里，你可以先看看，然后我们一步步实现，分析清楚每行代码背后的方法如何定义、为什么要这么定义。
+```go
+
+// 注册路由规则
+func registerRouter(core *framework.Core) {
+    // 需求1+2:HTTP方法+静态路由匹配
+  core.Post("/user/login", UserLoginController)
+    
+    // 需求3:批量通用前缀
+    subjectApi := core.Group("/subject")
+  {
+    subjectApi.Post("/add", SubjectAddController)
+        // 需求4:动态路由
+    subjectApi.Delete("/:id", SubjectDelController)
+    subjectApi.Put("/:id", SubjectUpdateController)
+    subjectApi.Get("/:id", SubjectGetController)
+        subjectApi.Get("/list/all", SubjectListController)
+  }  
+}
+```
+
+#### 实现 HTTP 方法和静态路由匹配
+
+们首先看第一个需求和第二个需求。由于有两个待匹配的规则，Request-URI 和 Method，所以自然联想到可以使用两级哈希表来创建映射。
+
+第一级 hash 是请求 Method，第二级 hash 是 Request-URI。
+
+这个路由 map 我们会存放在第一讲定义的 Core 结构里（如下），并且在初始化 Core 结构的时候，初始化第一层 map。所以还是拉出[geekbang/03](https://github.com/gohade/coredemo/blob/geekbang/03/framework/core.go) 分支，来更新框架文件夹中的 core.go 文件：
+```go
+
+// 框架核心结构
+type Core struct {
+}
+
+// 初始化框架核心结构
+func NewCore() *Core {
+  return &Core{}
+}
+
+// 框架核心结构实现Handler接口
+func (c *Core) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+  // TODO
+}
+```
+接下来我们按框架使用者使用路由的顺序分成四步来完善这个结构：<u>定义路由 map、注册路由、匹配路由、填充 ServeHTTP 方法。</u>
+
+首先，第一层 map 的每个 key 值都代表 Method，而且为了避免之后在匹配的时候，要转换一次大小写，我们将每个 key 都设置为大写。继续在框架文件夹中的 core.go 文件里写：
+```go
+// 框架核心结构
+type Core struct {
+  router map[string]map[string]ControllerHandler // 二级map
+}
+
+// 初始化框架核心结构
+func NewCore() *Core {
+    // 定义二级map
+  getRouter := map[string]ControllerHandler{}
+  postRouter := map[string]ControllerHandler{}
+  putRouter := map[string]ControllerHandler{}
+  deleteRouter := map[string]ControllerHandler{}
+
+    // 将二级map写入一级map
+  router := map[string]map[string]ControllerHandler{}
+  router["GET"] = getRouter
+  router["POST"] = postRouter
+  router["PUT"] = putRouter
+  router["DELETE"] = deleteRouter
+
+  return &Core{router: router}
+}
+```
+下一步就是路由注册，我们将路由注册函数按照 Method 名拆分为 4 个方法：Get、Post、Put 和 Delete。
+```go
+
+// 对应 Method = Get
+func (c *Core) Get(url string, handler ControllerHandler) {
+  upperUrl := strings.ToUpper(url)
+  c.router["GET"][upperUrl] = handler
+}
+
+// 对应 Method = POST
+func (c *Core) Post(url string, handler ControllerHandler) {
+  upperUrl := strings.ToUpper(url)
+  c.router["POST"][upperUrl] = handler
+}
+
+// 对应 Method = PUT
+func (c *Core) Put(url string, handler ControllerHandler) {
+  upperUrl := strings.ToUpper(url)
+  c.router["PUT"][upperUrl] = handler
+}
+
+// 对应 Method = DELETE
+func (c *Core) Delete(url string, handler ControllerHandler) {
+  upperUrl := strings.ToUpper(url)
+  c.router["DELETE"][upperUrl] = handler
+}
+```
+我们这里将 URL 全部转换为大写了，在后续匹配路由的时候，也要记得把匹配的 URL 进行大写转换，这样我们的路由就会是“大小写不敏感”的，对使用者的容错性就大大增加了。
+
+注册完路由之后，如何匹配路由就是我们第三步需要做的事情了。首先我们实现匹配路由方法，这个匹配路由的逻辑我用注释写在代码中了。继续在框架文件夹中的 core.go 文件里写入：
+```go
+
+// 匹配路由，如果没有匹配到，返回nil
+func (c *Core) FindRouteByRequest(request *http.Request) ControllerHandler {
+  // uri 和 method 全部转换为大写，保证大小写不敏感
+  uri := request.URL.Path
+  method := request.Method
+  upperMethod := strings.ToUpper(method)
+  upperUri := strings.ToUpper(uri)
+
+  // 查找第一层map
+  if methodHandlers, ok := c.router[upperMethod]; ok {
+    // 查找第二层map
+    if handler, ok := methodHandlers[upperUri]; ok {
+      return handler
+    }
+  }
+  return nil
+}
+```
+代码很容易看懂，匹配逻辑就是去二层哈希 map 中一层层匹配，先查找第一层匹配 Method，再查第二层匹配 Request-URI。
+
+最后，我们就可以填充未实现的 ServeHTTP 方法了，所有请求都会进到这个函数中处理。（如果你有点模糊了，可以拿出第一节课中的思维导图，再巩固下 net/http 的核心逻辑。）继续在框架文件夹中的 core.go 文件里写：
+```go
+
+func (c *Core) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+
+  // 封装自定义context
+  ctx := NewContext(request, response)
+
+  // 寻找路由
+  router := c.FindRouteByRequest(request)
+  if router == nil {
+    // 如果没有找到，这里打印日志
+    ctx.Json(404, "not found")
+    return
+  }
+
+  // 调用路由函数，如果返回err 代表存在内部错误，返回500状态码
+  if err := router(ctx); err != nil {
+    ctx.Json(500, "inner error")
+    return
+  }
+}
+```
+这个函数就把我们前面三讲的内容都串起来了。先封装第二讲创建的自定义 Context，然后使用 FindRouteByRequest 函数寻找我们需要的路由，如果没有找到路由，返回 404 状态码；如果找到了路由，就调用路由控制器，另外如果路由控制器出现内部错误，返回 500 状态码。
+
+到这里，第一个和第二个需求就都完成了。
+
+#### 实现批量通用前缀
+
+对于第三个需求，我们可以通过一个 Group 方法归拢路由前缀地址。修正在业务文件夹下的 route.go 文件，使用方法改成这样：
+```go
+
+// 注册路由规则
+func registerRouter(core *framework.Core) {
+  // 需求1+2:HTTP方法+静态路由匹配
+  core.Get("/user/login", UserLoginController)
+
+  // 需求3:批量通用前缀
+  subjectApi := core.Group("/subject")
+  {
+    subjectApi.Get("/list", SubjectListController)
+  }
+}
+```
+下这个 Group 方法，它的参数是一个前缀字符串，返回值应该是包含 Get、Post、Put、Delete 方法的一个结构，我们给这个结构命名 Group，在其中实现各种方法。
+
+在这里我们暂停一下，看看有没有优化点。
+
+这么设计直接返回 Group 结构，确实可以实现功能，但试想一下，随着框架发展，如果我们发现 Group 结构的具体实现并不符合我们的要求了，需要引入实现另一个 Group2 结构，该怎么办？直接修改 Group 结构的具体实现么？
+
+<u>其实更好的办法是使用接口来替代结构定义。</u>在框架设计之初，我们要保证框架使用者，在最少的改动中，就能流畅迁移到 Group2，这个时候，如果返回接口 IGroup，而不是直接返回 Group 结构，就不需要修改 core.Group 的定义了，只需要修改 core.Group 的具体实现，返回 Group2 就可以。
+
+尽量使用接口来解耦合，是一种比较好的设计思路。
+
+怎么实现呢，这里我们定义 IGroup 接口来作为 Group 方法的返回值。在框架文件夹下创建group.go 文件来存放分组相关的信息：
+```go
+
+// IGroup 代表前缀分组
+type IGroup interface {
+  Get(string, ControllerHandler)
+  Post(string, ControllerHandler)
+  Put(string, ControllerHandler)
+  Delete(string, ControllerHandler)
+}
+```
+并且继续搭好 Group 结构代码来实现这个接口：
+```go
+
+// Group struct 实现了IGroup
+type Group struct {
+  core   *Core
+  prefix string
+}
+
+// 初始化Group
+func NewGroup(core *Core, prefix string) *Group {
+  return &Group{
+    core:   core,
+    prefix: prefix,
+  }
+}
+
+// 实现Get方法
+func (g *Group) Get(uri string, handler ControllerHandler) {
+  uri = g.prefix + uri
+  g.core.Get(uri, handler)
+}
+
+....
+
+// 从core中初始化这个Group
+func (c *Core) Group(prefix string) IGroup {
+  return NewGroup(c, prefix)
+}
+```
