@@ -1937,3 +1937,675 @@ func (c *Core) Get(url string, handlers ...ControllerHandler) {
 
 在 Golang 的这种模型中，每个协程是独立且平等的，即使是创建子协程的父协程，在 Goroutine 中也无法管理子协程。所以，<u>每个协程需要自己保证不会外抛 panic，</u>一旦外抛 panic 了，整个进程就认为出现异常，会终止进程。
 
+这一点搞清楚了，再看 Recovery 为什么必备就很简单。在 net/http 处理业务逻辑的协程中，要捕获在自己这个协程中抛出的 panic，就必须自己实现 Recovery 机制。
+
+而 Recovery 中间件就是用来为每个协程增加 Recovery 机制的。我们在框架的 middleware 文件夹中增加 recovery.go 存放这个中间件：
+```go
+
+// recovery机制，将协程中的函数异常进行捕获
+func Recovery() framework.ControllerHandler {
+  // 使用函数回调
+  return func(c *framework.Context) error {
+    // 核心在增加这个recover机制，捕获c.Next()出现的panic
+    defer func() {
+      if err := recover(); err != nil {
+        c.Json(500, err)
+      }
+    }()
+    // 使用next执行具体的业务逻辑
+    c.Next()
+
+    return nil
+  }
+}
+```
+这个中间件就是在 context.Next() 之前设置了 defer 函数，这个函数的作用就是捕获 c.Next() 中抛出的异常 panic。之后在业务文件夹中的 main.go，我们就可以通过 Core 结构的 Use 方法，对所有的路由都设置这个中间件。
+```go
+
+core.Use(middleware.Recovery())
+```
+今天所有代码的目录结构截图，我也贴在这里供你对比检查，代码放在 GitHub 上的 [04 分支](https://github.com/gohade/coredemo/tree/geekbang/04/framework)里。
+
+#### 小结
+
+今天我们最终为自己的框架增加了中间件机制。中间件机制的本质就是装饰器模型，对核心的逻辑函数进行装饰、封装，所以一开始我们就使用函数嵌套的方式实现了中间件机制。
+
+但是实现之后，我们发现函数嵌套的弊端：一是不优雅，二是无法批量设置中间件。所以我们<u>引入了 pipeline 的思想，将所有中间件做成一个链条，通过这个链条的调用，来实现中间件机制。</u>
+
+最后，我们选了最基础的 Recovery 中间件演示如何具体实现，一方面作为中间件机制的示例，另一方面，也在功能上为我们的框架增强了健壮性。
+
+中间件机制是我们必须要掌握的机制，很多 Web 框架中都有这个逻辑。<u>在架构层面，中间件机制就相当于，在每个请求的横切面统一注入了一个逻辑。</u>这种统一处理的逻辑是非常有用的，比如统一打印日志、统一打点到统计系统、统一做权限登录验证等。
+
+### 5.封装：如何让你的框架更好用
+
+在前面几节课，我们实现了框架的路由、中间件等机制，并且自定义 context 结构来封装请求。但是回顾在对 context 的封装中，我们只是将 request、response 结构直接放入 context 结构体中，对应的方法并没有很好的封装。所以这节课，我们要做的事情就是为 context 封装更多的方法，让框架更好用。
+
+在今天的学习中，希望你能认识到，函数封装并不是一件很简单、很随意的事情。相反，如何封装出易用、可读性高的函数是非常需要精心考量的，框架中每个函数的参数、返回值、命名，都代表着我们作为作者在某个事情上的思考。想要针对某个功能，封装出一系列比较完美的接口，更要我们从系统性的角度思考。
+
+#### 思考如何封装请求和返回
+
+- 读取请求数据
+
+要读取请求数据包含哪些内容呢？第一讲我们提到过，HTTP 消息体分为两个部分：HTTP 头部和 HTTP Body 体。头部描述的一般是和业务无关但与传输相关的信息，比如请求地址、编码格式、缓存时长等；Body 里面主要描述的是与业务相关的信息。
+
+所以针对请求数据的这两部分，我们应该设计不同的方法。
+
+Header 信息中，包含 HTTP 的一些基础信息，比如请求地址、请求方法、请求 IP、请求域名、Cookie 信息等，是经常读取使用的，为了方便，我们需要一一提供封装。
+
+而另外一些更细节的内容编码格式、缓存时长等，由于涉及的 HTTP 协议细节内容比较多，我们很难将每个细节都封装出来，但是它们都是以 key=value 的形式传递到服务端的，所以这里也考虑封装一个通用的方法。
+
+Body 信息中，HTTP 是已经以某种形式封装好的，可能是 JSON 格式、XML 格式，也有可能是 Form 表单格式。其中 Form 表单注意一下，它可能包含 File 文件，请求参数和返回值肯定和其他的 Form 表单字段是不一样的，需要我们对其单独封装一个函数。
+
+- 封装返回数据
+
+封装返回数据，指的是将处理后的数据返回给浏览器。同样，它也分为两个部分，Header 头部和 Body 体。
+
+Header 头部，我们经常要设置的是返回状态码和 Cookie，所以单独为其封装。其他的 Header 同样是 key=value 形式设置的，设置一个通用的方法即可。
+
+返回数据的 Body 体是有不同形式的，比如 JSON、JSONP、XML、HTML 或者其他文本格式，所以我们要针对不同的 Body 体形式，进行不同的封装。一路分析下来，再列出这样一个思维导图就非常清晰了。
+![](_images/4-24.jpg)
+
+#### 定义接口让封装更明确
+
+现在分析完需要封装哪些方法了，你已经迫不及待想开始进行封装函数的实现了吧。但是这里，我再给一个编码小建议：<u>对于比较完整的功能模块，先定义接口，再具体实现。</u>
+
+首先，定义一个清晰的、包含若干个方法的接口，可以让使用者非常清楚：这个功能模块提供了哪些函数、哪些函数是我要的、哪些函数是我不要的，在用的时候，查找也更方便。如果你有过，在超过 20 个函数的结构体中，查找你需要的函数的惨痛经历，你就会觉得这一点尤为重要了。
+
+其次，定义接口能做到“实现解耦”。使用接口作为参数、返回值，能够让使用者在写具体函数的时候，有不同的实现；而且在不同实现中，只需要做到接口一致，就能很简单进行替换，而不用修改使用方的任何代码。
+
+好，明白这两点，我们再回到封装需求上，先定义两个接口：IRequest 和 IResponse，分别对应“读取请求数据”和“封装返回数据” 这两个功能模块。
+
+我们分别在框架目录下创建 request.go 和 response.go 来存放这两个接口及其实现。
+
+#### IRequest 接口定义
+
+读取请求数据 IRequest，我们定义的方法如下，在 request.go 中进行修改：
+```go
+// 代表请求包含的方法
+type IRequest interface {
+  // 请求地址 url 中带的参数
+  // 形如: foo.com?a=1&b=bar&c[]=bar
+  QueryInt(key string, def int) (int, bool)
+  QueryInt64(key string, def int64) (int64, bool)
+  QueryFloat64(key string, def float64) (float64, bool)
+  QueryFloat32(key string, def float32) (float32, bool)
+  QueryBool(key string, def bool) (bool, bool)
+  QueryString(key string, def string) (string, bool)
+  QueryStringSlice(key string, def []string) ([]string, bool)
+  Query(key string) interface{}
+
+  // 路由匹配中带的参数
+  // 形如 /book/:id
+  ParamInt(key string, def int) (int, bool)
+  ParamInt64(key string, def int64) (int64, bool)
+  ParamFloat64(key string, def float64) (float64, bool)
+  ParamFloat32(key string, def float32) (float32, bool)
+  ParamBool(key string, def bool) (bool, bool)
+  ParamString(key string, def string) (string, bool)
+  Param(key string) interface{}
+
+  // form 表单中带的参数
+  FormInt(key string, def int) (int, bool)
+  FormInt64(key string, def int64) (int64, bool)
+  FormFloat64(key string, def float64) (float64, bool)
+  FormFloat32(key string, def float32) (float32, bool)
+  FormBool(key string, def bool) (bool, bool)
+  FormString(key string, def string) (string, bool)
+  FormStringSlice(key string, def []string) ([]string, bool)
+  FormFile(key string) (*multipart.FileHeader, error)
+  Form(key string) interface{}
+
+  // json body
+  BindJson(obj interface{}) error
+
+  // xml body
+  BindXml(obj interface{}) error
+
+  // 其他格式
+  GetRawData() ([]byte, error)
+
+  // 基础信息
+  Uri() string
+  Method() string
+  Host() string
+  ClientIp() string
+
+  // header
+  Headers() map[string]string
+  Header(key string) (string, bool)
+
+  // cookie
+  Cookies() map[string]string
+  Cookie(key string) (string, bool)
+}
+```
+简单说明一下，我们使用了 QueryXXX 的系列方法来代表从 URL 的参数后缀中获取的参数；使用 ParamXXX 的系列方法来代表从路由匹配中获取的参数；使用 FormXXX 的系列方法来代表从 Body 的 form 表单中获取的参数。
+
+这三个系列的方法，我们统一了参数和返回值。
+- 参数一般都有两个：一个是 key，代表从参数列表中查找参数的关键词；另外一个是 def，代表如果查找不到关键词，会使用哪个默认值进行返回。
+- 返回值返回两个：一个代表对应 key 的匹配值，而另一个 bool 返回值代表是否有这个返回值。
+
+这样的设计，在获取参数的时候，能让需要处理的两个逻辑，默认参数和是否有参数，都得到很好的处理；同时对于 JSON 格式、XML 格式的 Body 结构读取，也提供了对应的方法。
+
+对基础信息，我们提供了 URI、Method、Host、ClinetIp 等方法；对 Header 头，我们提供根据 key 获取 Header 值的通用方法；同时，也对 Cookie 单独提供了批量获取 Cookie 和按照关键词获取 Cookie 的两个方法。
+
+这些都对应我们第一部分分析的思维导图中“读取请求数据”部分。
+
+#### IResponse 接口定义
+
+对于封装返回数据 IResponse，我们在 response.go 中定义的方法如下：
+```go
+
+// IResponse 代表返回方法
+type IResponse interface {
+  // Json 输出
+  Json(obj interface{}) IResponse
+
+  // Jsonp 输出
+  Jsonp(obj interface{}) IResponse
+
+  //xml 输出
+  Xml(obj interface{}) IResponse
+
+  // html 输出
+  Html(template string, obj interface{}) IResponse
+
+  // string
+  Text(format string, values ...interface{}) IResponse
+
+  // 重定向
+  Redirect(path string) IResponse
+
+  // header
+  SetHeader(key string, val string) IResponse
+
+  // Cookie
+  SetCookie(key string, val string, maxAge int, path, domain string, secure, httpOnly bool) IResponse
+
+  // 设置状态码
+  SetStatus(code int) IResponse
+
+  // 设置 200 状态
+  SetOkStatus() IResponse
+}
+```
+对于 Header 部分，我们设计了状态码的设置函数 SetStatus/SetOkStatus/Redirect，还设计了 Cookie 的设置函数 SetCookie，同时，我们提供了通用的设置 Header 的函数 SetHeader。
+
+对于 Body 部分，我们设计了 JSON、JSONP、XML、HTML、Text 等方法来输出不同格式的 Body。
+
+这里注意下，<u>很多方法的返回值使用 IResponse 接口本身， 这个设计能允许使用方进行链式调用。</u>链式调用的好处是，能很大提升代码的阅读性，比如在业务逻辑代码 controller.go 里这个调用方法：
+```go
+c.SetOkStatus().Json("ok, UserLoginController: " + foo)
+```
+就能很好地阅读：“返回成功，并且输出 JSON 字符串”。这种通过返回值返回接口本身的小技巧，我们后面会经常用到。
+
+#### 实现具体的接口
+
+接下来，我们需要实现这两个接口，直接将 Context 这个数据结构，实现这两个接口定义的方法就行了。<u>因为在 Golang 中，只要包含了接口所带的函数就是实现了接口，并不需要显式标记继承。</u>
+
+由于这些接口有的比较重复，所以这里只解说几个重点的实现，具体可以参考 [GitHub 05](https://github.com/gohade/coredemo/tree/geekbang/05)仓库。
+
+#### 请求相关接口实现
+
+我们先将注意力专注在 Request 请求相关的方法上，首先处理刚才在 request.go 中定义的 Query 相关的参数请求方法。
+```go
+  // 请求地址 url 中带的参数
+  // 形如: foo.com?a=1&b=bar&c[]=bar
+  QueryInt(key string, def int) (int, bool)
+  QueryInt64(key string, def int64) (int64, bool)
+  QueryFloat64(key string, def float64) (float64, bool)
+  QueryFloat32(key string, def float32) (float32, bool)
+  QueryBool(key string, def bool) (bool, bool)
+  QueryString(key string, def string) (string, bool)
+  QueryStringSlice(key string, def []string) ([]string, bool)
+  Query(key string) interface{}
+```
+如何获取请求参数呢，我们可以从 http.Request 结构中，通过 Query 方法，获取到请求 URL 中的参数。
+
+##### Query 请求方法实现
+
+所以，在 request.go 中，我们先创建一个 QueryAll() 方法。
+```go
+
+// 获取请求地址中所有参数
+func (ctx *Context) QueryAll() map[string][]string {
+  if ctx.request != nil {
+    return map[string][]string(ctx.request.URL.Query())
+  }
+  return map[string][]string{}
+}
+```
+接着要做的，就是将这个 QueryAll 查询出来的 map 结构根据 key 查询，并且转换为其他类型的数据结构，比如 Int、Int64、Float64、Float32 等。
+
+这里我推荐一个[第三方库 cast](https://github.com/spf13/cast)，这个库实现了多种常见类型之间的相互转换，返回最符合直觉的结果，通过[这个网站](https://pkg.go.dev/)可以查看其提供的所有方法，这里展示部分你可以看看：
+```go
+...
+func ToUint(i interface{}) uint
+func ToUint16(i interface{}) uint16
+func ToUint16E(i interface{}) (uint16, error)
+func ToUint32(i interface{}) uint32
+func ToUint32E(i interface{}) (uint32, error)
+func ToUint64(i interface{}) uint64
+func ToUint64E(i interface{}) (uint64, error)
+func ToUint8(i interface{}) uint8
+func ToUint8E(i interface{}) (uint8, error)
+func ToUintE(i interface{}) (uint, error)
+...
+```
+归纳起来，cast 提供类型转换方法，参数可以是任意类型，转换为对应的目标类型，每种转换会提供两组方法，一组是带 error 返回值的方法，一组是不带 error 返回值的。如果使用 cast 库，我们将 request.go 中 QueryXXX 方式的实现修改一下：
+```go
+// 获取 Int 类型的请求参数
+func (ctx *Context) QueryInt(key string, def int) (int, bool) {
+  params := ctx.QueryAll()
+  if vals, ok := params[key]; ok {
+    if len(vals) > 0 {
+      // 使用 cast 库将 string 转换为 Int
+      return cast.ToInt(vals[0]), true
+    }
+  }
+  return def, false
+}
+```
+QueryAll 返回一个 map 结构，根据 key 查找出对应的参数值，并且通过 cast 库将对应的参数值转化成目标数据结构。
+
+Query 的参数请求方法就实现完成了。Form 表单相关的请求方法是从 HTTP Body 中获取参数，同 Query 方法相类似，我们就不再重复，简单说下思路：可以从 http.Request 中获取到 Form 的请求参数，然后再用 cast 库进行类型转换。
+
+##### Param 请求方法实现
+
+Param 的请求方法是：通过路由解析请求地址，抽取请求地址中包含通配符的段。比如路由规则为 /subject/:id，真实请求 URI 为 /subject/1，那么获取 key 为 id 的 Param 值就为 1。
+
+怎么实现我们得回顾第三节课讲的路由，用 trie 树实现了路由规则。当请求进入的时候，将请求的 URI 地址根据分隔符分成不同的段，用这个段去匹配 trie 树。只有当每个段都匹配 trie 树中某个路径的时候，我们才将路径终止节点里的 Handlers ，作为这个请求的最终处理函数。
+![](_images/5-1.jpg)
+
+而在这个匹配路径中，有的节点是根据通配符进行匹配的，这些节点就是我们要查找的 Param 参数。
+
+现在就要获取路由解析过程中的这些通配符参数，最朴素的想法就是：查找出这个匹配路径，然后查找出其中的通配符节点，再和请求 URI 对应，获取这些通配符参数。我们看这个想法如何实现。
+
+之前查找路由的时候，查到的是匹配路径的最终节点，如何追溯到整个匹配路径呢？这里我们可以考虑构造一个双向链表：改造 node 节点，增加一个 parent 指针，指向父节点，将 trie 树变成一个双向指针。来修改框架目录中的 trie.go：
+```go
+// 代表节点
+type node struct {
+  ...
+  parent   *node               // 父节点，双向指针
+}
+```
+在增加路由规则（AddRouter）的时候，创建子节点也要同时修改这个 parent 指针，继续写：
+```go
+
+func (tree *Tree) AddRouter(uri string, handlers []ControllerHandler) error {
+  ...
+  // 对每个 segment
+  for index, segment := range segments {
+
+    ...
+    if objNode == nil {
+      // 创建一个当前 node 的节点
+      cnode := newNode()
+      cnode.segment = segment
+      if isLast {
+        cnode.isLast = true
+        cnode.handlers = handlers
+      }
+      // 父节点指针修改
+      cnode.parent = n
+      n.childs = append(n.childs, cnode)
+      objNode = cnode
+    }
+
+    n = objNode
+  }
+
+  return nil
+}
+```
+这样，双向链表就修改完了。接着就根据最终匹配的节点和请求 URI，查找出整个匹配链路中的通配符节点和对应 URI 中的分段，还是在 trie.go 里继续写：
+```go
+
+// 将 uri 解析为 params
+func (n *node) parseParamsFromEndNode(uri string) map[string]string {
+  ret := map[string]string{}
+  segments := strings.Split(uri, "/")
+  cnt := len(segments)
+  cur := n
+  for i := cnt - 1; i >= 0; i-- {
+    if cur.segment == "" {
+      break
+    }
+    // 如果是通配符节点
+    if isWildSegment(cur.segment) {
+      // 设置 params
+      ret[cur.segment[1:]] = segments[i]
+    }
+    cur = cur.parent
+  }
+  return ret
+}
+```
+接下来，为了让 context 中有 map 结构的路由参数，我们将解析出来的 params 存储到 context 结构中。这里修改框架目录中的 core.go 文件：
+```go
+
+// 所有请求都进入这个函数, 这个函数负责路由分发
+func (c *Core) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+
+  // 封装自定义 context
+  ctx := NewContext(request, response)
+
+  // 寻找路由
+  node := c.FindRouteNodeByRequest(request)
+  ...
+
+  // 设置路由参数
+  params := node.parseParamsFromEndNode(request.URL.Path)
+  ctx.SetParams(params)
+
+  ...
+}
+```
+接下来，为了让 context 中有 map 结构的路由参数，我们将解析出来的 params 存储到 context 结构中。这里修改框架目录中的 core.go 文件：
+```go
+
+// 所有请求都进入这个函数, 这个函数负责路由分发
+func (c *Core) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+
+  // 封装自定义 context
+  ctx := NewContext(request, response)
+
+  // 寻找路由
+  node := c.FindRouteNodeByRequest(request)
+  ...
+
+  // 设置路由参数
+  params := node.parseParamsFromEndNode(request.URL.Path)
+  ctx.SetParams(params)
+
+  ...
+}
+```
+最后，回到框架目录的 request.go，我们还是使用 cast 库来将这个 Param 系列方法完成：
+```go
+
+// 获取路由参数
+func (ctx *Context) Param(key string) interface{} {
+  if ctx.params != nil {
+    if val, ok := ctx.params[key]; ok {
+      return val
+    }
+  }
+  return nil
+}
+
+// 路由匹配中带的参数
+// 形如 /book/:id
+func (ctx *Context) ParamInt(key string, def int) (int, bool) {
+  if val := ctx.Param(key); val != nil {
+    // 通过 cast 进行类型转换
+    return cast.ToInt(val), true
+  }
+  return def, false
+}
+```
+##### Bind 请求方法实现
+
+到这里，ParamXXX 系列函数就完成了，接下来我们看下 BindXXX 系列函数，比如 BindJson。它的实现只需要简单 2 步：读取 Body 中的文本、解析 body 文本到结构体。所以修改 response.go 中的函数：
+```go
+
+// 将 body 文本解析到 obj 结构体中
+func (ctx *Context) BindJson(obj interface{}) error {
+  if ctx.request != nil {
+    // 读取文本
+    body, err := ioutil.ReadAll(ctx.request.Body)
+    if err != nil {
+      return err
+    }
+    // 重新填充 request.Body，为后续的逻辑二次读取做准备
+    ctx.request.Body = ioutil.NopCloser(bytes.NewBuffer(body))
+
+    // 解析到 obj 结构体中
+    err = json.Unmarshal(body, obj)
+    if err != nil {
+      return err
+    }
+  } else {
+    return errors.New("ctx.request empty")
+  }
+  return nil
+}
+```
+读取 Body 中的文本，我们使用 ioutil.ReadAll 方法，解析 Body 文本到结构体中，我们使用 json.Unmarshal 方法。
+
+这里要注意，request.Body 的读取是一次性的，读取一次之后，下个逻辑再去 request.Body 中是读取不到数据内容的。所以我们读取完 request.Body 之后，还要再复制一份 Body 内容，填充到 request.Body 里。
+
+#### 返回相关接口实现
+
+返回接口中的 JSON、XML、TEXT 的输出是比较简单的，将输出数据结构进行序列化就行，这里我们重点讲比较复杂的两种实现 JSONP 输出和 HTML 输出。
+
+##### JSONP 输出方法实现
+
+JSONP 是一种我们常用的解决跨域资源共享的方法，简要介绍下这个方法的原理。
+
+在 JavaScript 中使用 HTTP 请求（Ajax）会受到同源策略的限制。比如说 A 网站的页面不能在 JavaScript 中跨域访问 B 网站的资源。但是，如果我们希望能跨域访问怎么办？
+
+<u>我们知道 HTML 中标签script中的请求是不受同源策略影响的，那如果能将 B 网站的资源数据，通过 script 标签返回来，是不是就直接解决了跨域问题？确实，JSONP 就是这么设计的，通过 script 标签的源地址，返回数据资源 + JavaScript 代码。</u>
+
+比如 A 网站的网页如下，它希望从 B 网站中获取数据，填充进 id 为"context"的 div 标签中。
+```html
+<html>
+  <body>
+    <div id="context"></div>
+  </body>
+</html>
+
+<script>
+  function callfun(data) {
+     document.getElementById('context').innerHTML = data;
+  }
+</script>
+
+<script src="http://B.com/jsonp?callback=callfun"></script>
+```
+使用 ajax 请求的时候，我们是做不到这一点的，因为同源策略限制了网页和数据必须在同一个源下。但是如果 B 网站的接口支持了 JSONP，它能根据请求参数返回一段 JavaScript 代码，类似：
+```go
+callfunc({"id":1, "name": jianfengye})
+```
+这时 A 网站的网页，就能直接调用 callfunc 方法，并且获取到 B 网站返回的数据。
+
+了解了 JSONP 的原理，我们回到服务端实现 JSONP 的方法中。<u>这个方法要做的事情就是：获取请求中的参数作为函数名，获取要返回的数据 JSON 作为函数参数，将函数名 + 函数参数作为返回文本。</u>
+
+我们在 response.go 中补充 Jsonp 方法。
+```go
+
+// Jsonp 输出
+func (ctx *Context) Jsonp(obj interface{}) IResponse {
+  // 获取请求参数 callback
+  callbackFunc, _ := ctx.QueryString("callback", "callback_function")
+  ctx.SetHeader("Content-Type", "application/javascript")
+  // 输出到前端页面的时候需要注意下进行字符过滤，否则有可能造成 XSS 攻击
+  callback := template.JSEscapeString(callbackFunc)
+
+  // 输出函数名
+  _, err := ctx.responseWriter.Write([]byte(callback))
+  if err != nil {
+    return ctx
+  }
+  // 输出左括号
+  _, err = ctx.responseWriter.Write([]byte("("))
+  if err != nil {
+    return ctx
+  }
+  // 数据函数参数
+  ret, err := json.Marshal(obj)
+  if err != nil {
+    return ctx
+  }
+  _, err = ctx.responseWriter.Write(ret)
+  if err != nil {
+    return ctx
+  }
+  // 输出右括号
+  _, err = ctx.responseWriter.Write([]byte(")"))
+  if err != nil {
+    return ctx
+  }
+  return ctx
+}
+```
+##### HTML 输出方法实现
+
+HTML 函数输出的就是一个纯 HTML 页面。现在的 HTML 页面，基本都是动态页面，也就是说页面基本内容都是一样，但是根据不同请求、不同逻辑，页面中的数据部分是不同的。所以，我们在输出 HTML 页面内容的时候，常用“模版 + 数据”的方式。
+
+模版中存放的是页面基本内容，包括布局信息（CSS）、通用脚本（JavaScript）、页面整体结构（HTML）。但是页面结构中，某个标签的具体内容、具体数值，就表示成数据，在模版中保留数据的位置，在最终渲染 HTML 内容的时候，把数据填充进入模版就行了。
+
+在 Golang 中，这种“模版 + 数据”的文本渲染方式是有一个官方库来实现的 [html/template](https://golang.org/pkg/html/template/) ，它的模版使用{{.XX}} 作为数据的占位符，表示传入的数据结构的某个字段：
+```html
+<h1>{{.PageTitle}}</h1>
+<ul>
+    {{range .Todos}}
+        {{if .Done}}
+            <li class="done">{{.Title}}</li>
+        {{else}}
+            <li>{{.Title}}</li>
+        {{end}}
+    {{end}}
+</ul>
+```
+传入的数据结构为：
+```go
+
+data := TodoPageData{
+    PageTitle: "My TODO list",
+    Todos: []Todo{
+        {Title: "Task 1", Done: false},
+        {Title: "Task 2", Done: true},
+        {Title: "Task 3", Done: true},
+    },
+}
+```
+所以具体的渲染可以分成两步：先根据模版创造出 template 结构；再使用 template.Execute 将传入数据和模版结合。
+
+我们的 HTML 函数可以使用 html/template，修改框架目录 response.go 中的 Html 方法：
+```go
+
+// html 输出
+func (ctx *Context) Html(file string, obj interface{}) IResponse {
+  // 读取模版文件，创建 template 实例
+  t, err := template.New("output").ParseFiles(file)
+  if err != nil {
+    return ctx
+  }
+  // 执行 Execute 方法将 obj 和模版进行结合
+  if err := t.Execute(ctx.responseWriter, obj); err != nil {
+    return ctx
+  }
+
+  ctx.SetHeader("Content-Type", "application/html")
+  return ctx
+}
+
+```
+参数为模版文件和输出对象，先使用 ParseFiles 来读取模版文件，创建一个 template 数据结构，然后使用 Execute 方法，将数据对象和模版进行结合，并且输出到 responseWriter 中。
+这节课的代码结构放在这里了，完整的代码在 GitHub 上的[geekbang/05分支](https://github.com/gohade/coredemo/tree/geekbang/05)上。
+
+#### 小结
+
+我们这节课在 context 这个数据结构中，封装和实现“读取请求数据”和“封装返回数据”的方法。首先系统思考这两个需求功能的封装；再设计 IRequest 和 IResponse 两个接口，定义了对应的方法，并且让 context 实现这两个接口；最后，我们对这两个接口的方法进行了具体实现。
+
+你现在是不是认识到了，为什么我在开头会说，函数封装并不是一件很简单、很随意的事情，如何封装出易用、可读性高的函数是需要我们精心考量的。
+
+如果说一定要记住一句话，希望你能记住，在实现“读取请求数据”和“封装返回数据”的过程中，采用“<u>先系统设计，再定义接口，最后具体实现</u>”的系统思考方法。如果你一接到要开发某些功能模块需求，不先想清楚就立刻上手，最终实现的代码，细节会非常混乱，复用性极差。
+
+请记住，设计永远优于实现！
+
+### 6.重启：如何进行优雅关闭
+
+通过前面几节课的学习，我们已经能启动一个按照路由规则接收请求、进入控制器计算逻辑的服务器了。
+
+但是，在实际业务开发过程中，功能和需求一定是不断迭代的，在迭代过程中，势必需要重启服务，这里的重启就是指一个关闭、启动进程的完成过程。
+
+目前所有服务基本都无单点问题，都是集群化部署。对一个服务的关闭、启动进程来说，启动的流程基本上问题不大，可以由集群的统一管理器，比如 Kubernetes，来进行服务的启动，启动之后慢慢将流量引入到新启动的节点，整个服务是无损的。
+
+但是在关闭服务的过程中，要考虑的情况就比较复杂了，比如说有服务已经在连接请求中怎么办？如果关闭服务的操作超时了怎么办？所以这节课我们就来研究下如何优雅关闭一个服务。
+
+#### 如何优雅关闭
+
+什么叫优雅关闭？你可以对比着想，不优雅的关闭比较简单，就是什么都不管，强制关闭进程，这明显会导致有些连接被迫中断。
+
+或许你并没有意识到这个问题的严重性，不妨试想下，当一个用户在购买产品的时候，由于不优雅关闭，请求进程中断，导致用户的钱包已经扣费了，但是商品还未进入用户的已购清单中。这就会给用户带来实质性的损失。
+
+所以，优雅关闭服务，其实说的就是，关闭进程的时候，不能暴力关闭进程，而是要等进程中的所有请求都逻辑处理结束后，才关闭进程。按照这个思路，<u>需要研究两个问题“如何控制关闭进程的操作” 和 “如何等待所有逻辑都处理结束”。</u>
+
+当我们了解了如何控制进程关闭操作，就可以延迟关闭进程行为，设置为等连接的逻辑都处理结束后，再关闭进程。
+
+#### 如何控制关闭进程的操作
+
+那么第一个问题，如何控制关闭进程的操作怎么解决？你可以先想想平时关闭一个进程的方法有哪些，如果这些方法都有办法控制关闭操作，那么是不是就达到目的了。
+
+- Ctrl+c
+
+在终端，在非后台模式下启动一个进程的时候，要想关闭，我们在控制台会使用 Ctrl+C 来关闭进程。不管在 Unix 类的系统，还是在 Windows 系统中，Ctrl+C 都是向进程发送信号 SIGINT，这个信号代表的是中断，常用在通过键盘通知前台进程关闭程序的情景中。这个信号是可以被阻塞和处理的
+
+- Ctrl+\
+
+这个键盘操作是向进程发送信号 SIGQUIT，这个信号其实和 SIGINT 差不多，也是可以被阻塞和处理的，它们都是为了通知进程结束，唯一不同的是，进程处理 QUIT 退出的时候，默认行为会产生 core 文件。
+
+- Kill命令
+
+当使用后台模式挂起一个进程的时候，操作系统会给这个进程分配一个进程号 pid， 我们可以通过 kill pid 或者 kill -9 pid 来杀死某个进程。
+
+kill pid 会向进程发送 SIGTERM 信号，而 kill -9 会向进程发送 SIGKILL 信号。这两个信号都用于立刻结束进程，但是 SIGTERM 是可以被阻塞和处理的，而 SIGKILL 信号是不能被阻塞和处理的。
+
+用表格总结一下终止进程的这几个信号和对应的操作：
+![](_images/5-2.jpg)
+
+除了 SIGKILL 信号无法被捕获之外，其他的信号都能捕获，所以，只要在程序中捕获住这些信号，就能实现控制关闭进程操作了。那么接下来要解决的问题就是，在 Golang 中如何捕获信号呢？
+
+对于这个问题，标准库提供了 os/signal 这个库，还记得第一节课说的快速了解一个库的方法么，<u>库函数 > 结构定义 > 结构函数。</u>
+
+##### os/signal 库
+
+所以，第一步我们使用 go doc os/signal|grep "^func" 来了解下这个库的函数，看看提供了哪些功能。
+```go
+
+// 忽略某个信号
+func Ignore(sig ...os.Signal){}
+// 判断某个信号是否被忽略了
+func Ignored(sig os.Signal) bool{}
+// 关注某个/某些/全部 信号
+func Notify(c chan<- os.Signal, sig ...os.Signal){}
+// 取消使用 notify 对信号产生的效果
+func Reset(sig ...os.Signal){}
+// 停止所有向 channel 发送的效果
+func Stop(c chan<- os.Signal){}
+```
+这个库提供了订阅信号的方法 Notify 和忽略信号的方法 Ignore ，为了全局管理方便，也提供了停止所有订阅的 Stop 函数。另外还有，停止某些订阅的 Reset 函数，当我们已经订阅了某些信号之后，想重新将其中的某些信号不进行订阅，那么可以使用 Reset 方法。
+
+然后就是第二、第三步，通过 go doc os/signal|grep "^type" 了解到，这个库比较简单，没有任何结构定义和结构函数，因为管理信号只需要几个库函数即可，不需要进行更多的模块划分和数据结构抽象。在 Golang 的官方类库中，有不少都是这样只提供库函数，而没有自定义的模块数据结构的。
+
+理解完了捕获信号的 os/signal 库，我们就明白了，要控制这些信号量可以使用 Notify 方法，所以在业务 main.go 里补充：
+```go
+
+func main() {
+  ...
+  // 这个 Goroutine 是启动服务的 Goroutine
+  go func() {
+    server.ListenAndServe()
+  }()
+
+  // 当前的 Goroutine 等待信号量
+  quit := make(chan os.Signal)
+  // 监控信号：SIGINT, SIGTERM, SIGQUIT
+  signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+  // 这里会阻塞当前 Goroutine 等待信号
+  <-quit
+
+  ...
+}
+```
+注意下这里有两个 Goroutine，一个 Goroutine 是提供启动服务的，另外一个 Goroutine 用于监听信号并且结束进程。那么哪个 Goroutine 用于监听信号呢？
+
+答案是 main 函数所在的当前 Goroutine。因为使用 Ctrl 或者 kill 命令，它们发送的信号是进入 main 函数的，即只有 main 函数所在的 Goroutine 会接收到，<u>所以必须在 main 函数所在的 Goroutine 监听信号。</u>
+
+在监听信号的 Goroutine 中，我们先创建了一个等待信号量的 channel，然后通过 Notify 方法，订阅 SIGINT、SIGTERM、SIGQUIT 三个可以捕获处理的信号量，并且将信号量导入到 channel 中。
+
+最后，使用 channel 的导出操作，来阻塞当前 Goroutine，让当前 Goroutine 只有捕获到结束进程的信号之后，才进行后续的关闭操作。这样就实现了第一个问题进程关闭的可控。
+
+
