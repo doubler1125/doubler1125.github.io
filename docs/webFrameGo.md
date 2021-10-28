@@ -2608,4 +2608,960 @@ func main() {
 
 最后，使用 channel 的导出操作，来阻塞当前 Goroutine，让当前 Goroutine 只有捕获到结束进程的信号之后，才进行后续的关闭操作。这样就实现了第一个问题进程关闭的可控。
 
+#### 如何等待所有逻辑都处理结束
 
+然后就是第二个问题“如何等待所有逻辑都处理结束”。
+
+在 Golang 1.8 版本之前，net/http 是没有提供方法的，所以当时开源社区涌现了不少第三方解决方案： [manners](https://github.com/braintree/manners) 、 [graceful](https://github.com/tylerstillwater/graceful) 、 [grace](https://github.com/facebookarchive/grace) 。
+
+它们的思路都差不多：自定义一个 Server 数据结构，其中包含 net/http 的 Server 数据结构，以及和 net/http 中 Server 一样的启动服务函数，在这个函数中，除了调用启动服务，还设计了一个监听事件的函数。监听事件结束后，通过 channel 等机制来等待主流程结束。
+
+在 1.8 版本之后，net/http 引入了 server.Shutdown 来进行优雅重启。
+
+<u>server.Shutdown 方法是个阻塞方法，一旦执行之后，它会阻塞当前 Goroutine，并且在所有连接请求都结束之后，才继续往后执行。</u>实现非常容易，思路也和之前的第三方解法差不多，所以就重点理解这个方法。
+
+##### server.Shutdown 源码
+
+来看 server.Shutdown 的源码，同样你可以通过 IDE 跳转工具直接跳转到 Shutdown 源码进行阅读，使用第一节课教的思维导图的方式，列出 Shutdown 函数的代码逻辑流程图。我们还是从前往后讲。
+![](_images/5-3.jpg)
+
+第一层，在运行 Shutdown 方法的时候，先做一个标记，将 server 中的 isShutdown 标记为 true。
+```go
+srv.inShutdown.setTrue()
+
+func (b *atomicBool) setTrue()    { atomic.StoreInt32((*int32)(b), 1) 
+```
+这里标准库实现的就很细节了。inShutdown 是一个标记，它用来标记服务器是否正在关闭，标记的时候，还使用了 atomic 操作来保证标记的原子性。这里要琢磨一下，为什么要使用 atomic 操作呢？
+
+在 Golang 中，所有的赋值操作都不能保证是原子的，比如 int 类型的 a=a+1，或者 bool 类型的 a=true，这些赋值操作，在底层并不一定是由一个独立的 CPU 指令完成的。所以在并发场景下，我们并不能保证并发赋值的操作是安全的。
+
+比如有两个操作同时对 a 变量进行读写，写 a 变量的线程如果不是原子的，那么读 a 变量的线程就有可能读到写了一半的 a 变量。
+
+所以为保证原子性，Golang 提供了一个 atomic 包，当对一个字段赋值的时候，<u>如果你无法保证其是否原子操作，你可以使用 atomic 包来对这个字段进行赋值。</u>atomic 包，在底层一定会保证，这个操作是在一个单独的 CPU 指令内完成的
+
+因为这里的 srv.inShutdown 是一个非常重要的标记位。一旦由于任何原因，它读取错误，会发生严重问题，比如进程已经在处理结束的时候，启动 server 的进程还继续监听请求，这个时候会导致新接收的请求有服务错误。所以，这里为了保险起见，使用了一个标准库 atomic 来保证其原子性操作。
+
+然后是逻辑代码：
+```go
+for _, f := range srv.onShutdown {
+  go f()
+}
+```
+onShutdown 在 server 结构中按需求设置。这个字段保存的是回调方法，即用户希望 server 在关闭时进行的回调操作。比如用户可以设置在服务结束的时候，打印一个日志或者调用一个通知机制。如果用户设置了回调，则执行这些回调条件，如果没有设置，可以忽略。
+
+##### for 循环
+
+接下来进入这一层最重要的 for 循环。这个 for 循环是一个无限循环，它使用 ticker 来控制每次循环的节奏，通过 return 来控制循环的终止条件。这个写法很值得我们学习。
+```go
+ticker := time.NewTicker(shutdownPollInterval) // 设置轮询时间
+  defer ticker.Stop()
+  for {
+        // 真正的操作
+    if srv.closeIdleConns() && srv.numListeners() == 0 {
+      return lnerr
+    }
+    select {
+    case <-ctx.Done(): // 如果ctx有设置超时，有可能触发超时结束
+      return ctx.Err()
+    case <-ticker.C:  // 如果没有结束，最长等待时间，进行轮询
+    }
+  }
+```
+我们在工作中经常会遇到类似的需求：每隔多少时间，执行一次操作，应该有不少同学会使用 time.Sleep 来做间隔时长，而这里演示了如何使用 time.Ticker 来进行轮询设置。这两种方式其实都能完成“每隔多少时间做一次操作”，但是又有一些不同。
+
+time.Sleep 是用阻塞当前 Goroutine 的方式来实现的，它需要调度先唤醒当前 Goroutine，才能唤醒后续的逻辑。而 Ticker 创建了一个底层数据结构定时器 runtimeTimer，并且监听 runtimeTimer 计时结束后产生的信号。
+
+这个 runtimeTimer 是 Golang 定义的定时器，做了一些比较复杂的优化。比如在有海量定时器的场景下，runtimeTimer 会为每个核，创建一个 runtimeTimer，进行统一调度，所以它的 CPU 消耗会远低于 time.Sleep。所以说，使用 ticker 是 Golang 中最优的定时写法。
+![](_images/5-4.jpg)
+
+再回到源码思维导图中，可以看到真正执行操作的是 closeIdleConns 方法。这个方法的逻辑就是：判断所有连接中的请求是否已经完成操作（是否处于 Idle 状态），如果完成，关闭连接，如果未完成，则跳过，等待下次循环。
+```go
+
+// closeIdleConns 关闭所有的连接并且记录是否服务器的连接已经全部关闭
+func (s *Server) closeIdleConns() bool {
+  s.mu.Lock()
+  defer s.mu.Unlock()
+  quiescent := true
+  for c := range s.activeConn {
+    st, unixSec := c.getState()
+    // Issue 22682: 这里预留5s以防止在第一次读取连接头部信息的时候超过5s
+    if st == StateNew && unixSec < time.Now().Unix()-5 {
+      st = StateIdle
+    }
+    if st != StateIdle || unixSec == 0 {
+      // unixSec == 0 代表这个连接是非常新的连接，则标记位需要标记false
+      quiescent = false
+      continue
+    }
+    c.rwc.Close()
+    delete(s.activeConn, c)
+  }
+  return quiescent
+}
+```
+这个函数返回的 quiescent 标记位，是用来标记是否所有的连接都已经关闭。如果有一个连接还未关闭，标记位返回 false，否则返回 true。
+
+现在源码就梳理好了，再整理一下。
+
+为了实现先阻塞，然后等所有连接处理完再结束退出，Shutdown 使用了两层循环。其中：
+- 第一层循环是定时无限循环，每过 ticker 的间隔时间，就进入第二层循环；
+- 第二层循环会遍历连接中的所有请求，如果已经处理完操作处于 Idle 状态，就关闭连接，直到所有连接都关闭，才返回。
+
+所以我们可以在业务代码 main.go 中这么写：
+```go
+
+func main() {
+  ...
+
+  // 当前的 Goroutine 等待信号量
+  quit := make(chan os.Signal)
+  // 监控信号：SIGINT, SIGTERM, SIGQUIT
+  signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+  // 这里会阻塞当前 Goroutine 等待信号
+  <-quit
+
+  // 调用Server.Shutdown graceful结束
+  if err := server.Shutdown(context.Background()); err != nil {
+    log.Fatal("Server Shutdown:", err)
+  }
+}
+```
+
+#### 验证
+
+到这里，我们就完成了优雅关闭的逻辑。最后验证成果，写一个 10s 才能结束的控制器：
+```go
+
+func UserLoginController(c *framework.Context) error {
+  foo, _ := c.QueryString("foo", "def")
+  // 等待10s才结束执行
+  time.Sleep(10 * time.Second)
+  // 输出结果
+  c.SetOkStatus().Json("ok, UserLoginController: " + foo)
+  return nil
+}
+```
+按顺序执行下列操作，就能检验出你的关闭逻辑能不能跑通了。
+
+1. 在控制台启动 Web 服务
+2. 在浏览器启动一个请求进入 10s 才能结束的控制器
+3. 10s 内在控制台执行 Ctrl+C 关闭程序
+4. 观察控制台程序是否不会立刻结束，而是在 10s 后结束
+5. 浏览器端正常输出
+
+依次操作后，你在控制台可以看到，在执行完成 URI 之后，程序才退出。
+![](_images/5-5.jpg)
+
+而且，浏览器中正常输出控制器结果。说明你已经完整完成了优雅关闭逻辑！
+![](_images/5-6.jpg)
+
+今天只修改了业务文件夹中的 main.go 代码，框架目录并没有什么变化。
+
+有的同学可能会很奇怪，重启这个逻辑不应该放在框架目录的某个地方么，难道每次启动一个服务都要写这个逻辑么？不急，先了解掌握好优雅关闭的原理，在后续章节我们会为框架引入命令行工具，这些优雅关闭的逻辑就会作为框架的一部分存放在框架目录中了。
+
+#### 小结
+
+今天完成了优雅关闭进程的逻辑，通过标准库 os.Signal 来控制关闭进程的操作，并且通过 net/http 提供的 server.Shutdown 来实现优雅关闭。所有代码都同样放在 GitHub 上的 [geekbang/06](https://github.com/gohade/coredemo/tree/geekbang/06) 分支了。
+
+讲了很多代码细节，相信你看完 shutdown 这个函数的实现原理后，会不由得感叹 Golang 源码的优雅。很多同学会说没有好的 Golang 项目可以跟着学习，其实 Golang 源码本身就是一个非常好的学习资料。
+
+## 二、框架核心
+
+### 7.目标:站在巨人肩膀，你的理想框架到底长什么样
+
+理想框架到底是什么样子的？这个终极问题，闭门造车是无法得到答案的，所以今天，我想让你先从埋头搭建 Web 框架的视角中暂时跳出来，站在更高的角度来纵观全局。
+
+#### 开源框架怎么比较
+
+我们先进入开源世界，对比开源世界中现有的各种 Web 框架，理解一下它们的实现选择和意图。
+
+Golang 语言的 Web 开发有很多的框架可以用，但是选择太多也不是好事，因为在技术群里我总会遇到群友有这些疑问：哪款框架比较好呢？我要选择哪款框架呢？这些疑问至少暴露出两个问题：一不知道如何比较开源框架、二不了解这些开源框架，那么接下来我们一一解答。
+
+何比较开源框架？说到比较，是一定要有标准的。但是衡量一个 Web 框架是多维度的事情，也没有定论。这里我按照优先级顺序，列出我衡量一个框架的评判标准，你可以参考。
+![](_images/5-7.jpg)
+
+##### 核心模块
+
+一个框架最核心的几个部分就是我们前几节课讲到的：HTTP 服务的启动方式、路由、Context、中间件、重启方式，它们的实现非常关键，往往影响到整个框架的表现，也能直接体现出框架作者的开发水平。
+
+<u>框架的核心模块就好像是汽车的引擎，一旦核心模块出了问题，或者有隐性的缺陷，后果往往是无法弥补的。</u>理想的核心模块必须要有设计感，有自己的思想，代码质量、性能都不能出问题。
+
+##### 功能完备性
+
+框架最好能尽可能多地提供功能或者规范，比如有自己的日志模块、脚手架、命令行工具，甚至自己的 ORM、缓存等等。
+
+要知道，框架的本质还是在于提高开发效率，在团队中，<u>我们希望不同水平的同学能写出基本一样的代码，那就要靠框架这个顶层设计来规范了。试想一下，如果框架中提供了很方便的参数验证规范，</u>那在开发应用的时候，还有谁愿意走解析和正则匹配来验证参数呢?
+
+在功能完备性的选择上，我们往往会根据之后是否希望自定义需求来确定。这里说的自定义需求，指的是定制自己的日志、ORM 等模块的需求。
+
+##### 框架扩展性
+
+理想的框架，它的扩展性一定要好。<u>框架要做的事情应该是定义模块与模块之间的交互标准，而不应该直接定义模块的具体实现方式。</u>我可以在这个标准上扩展出我需要的功能，这样整个框架才会比较灵活。
+
+Web 领域的技术边界在不断扩展，谁也无法保证框架中所用的库，哪怕是最基本的日志库，能永远满足需求。当框架使用者想为应用增加一个功能，或者替换某个第三方库的时候，如果改动的地方非常多，要大动干戈，甚至根本就无法支持替换和增加，那这个框架的扩展性就比较弱了。
+
+##### 框架性能
+
+虽然大部分框架都是封装 net/http，但是封装程度不同以及具体的实现选择不同（使用的路由匹配、上下文机制等），就会有不同的性能表现。
+
+我们选择框架之后，最终是要在框架上运行代码的，如果运行效率有指数级别的差距，是不能接受的。市面上所有框架的性能，你可以参考这个[第三方测评结果](https://web-frameworks-benchmark.netlify.app/result)。
+
+其实对框架性能来说，大部分场景里，我们是不会有极致性能需求的。所以看各种框架的性能评估，我们不应该把各个框架孤立出来看，应该将差不多量级的性能归为一组。不要去比较单个框架的性能差异，而应该去比较不同量级组之间的性能差异，因为在相同量级下，其实框架和框架之间的性能差别并不是很大。
+
+##### 文档完备度及社区活跃度
+
+开源不仅仅是将代码分享出去，同时分享的还有使用文档，官方必须提供足够的介绍资料，包括文档、视频、demo 等
+
+文档和社区是需要不断运营的，因为在使用的过程中，我们一定会遇到各种各样的问题，官方的回复以及一个活跃的社区是保障问题能得到解决的必要条件。
+
+所以当我们选择一个框架的时候，官网、GitHub 的 star、issue 都是很好的衡量标准。当选择框架之后，不妨每天花一点时间在这个项目的官网、GitHub 或者邮件组上，你会得到很多真实信息。
+
+现在基本了解这五点评判标准了，我们可以用这把尺子衡量一下市面上的框架，帮助你迅速熟悉起来。
+
+#### 比较开源框架
+
+在开源社区有个 [go-web-framework-stars](https://github.com/mingrammer/go-web-framework-stars) 项目，把 41 款 Go Web 框架按流行程度做了个列表，其中 Gin、Beego、Echo 这三个框架是 Star 数排名前三的，下面我们就针对这三个框架来分析。
+
+在刚才的五个维度中，我们会重点分析这三个框架的核心模块和功能完备性这两点，另外三点扩展性、性能以及文档完备性资料很多，我只在表格中简单说明一下。
+
+##### Beego
+
+Beego 是一款国人开发的 Web 框架，它出现得非常早，中间经历过一次比较大的改版，目前版本定位在 2.0.0。
+
+先来看 Beego 的核心模块，我们还是从 HTTP 服务的启动方式、路由、Context、中间件、重启方式这五个方面来分析。
+
+Beego 提供多种服务启动方式：HTTP/HTTPS、CGI、Graceful。
+
+它的路由原理是为每个 HTTP 方法建立一个路由树，这个路由树结构的每个叶子节点是具体的执行控制器，每个中间节点是 HTTP 请求中斜杠“/”分隔的节。比如 /user/name 从根到叶子节点的通路就是：1 个根节点、1 个中间节点 user、一个叶子节点 name
+![](_images/5-8.jpg)
+Beego 的自动匹配路由和注解路由是比较有特色的，这里我简单解释一下：
+- 自动匹配路由的意思是，如果我们把一个控制器注册到自动路由中，路由寻址的时候，会根据“控制器名称 + 控制器类”中的方法名，自动进行映射匹配。
+- 注解路由是指在注册路由树的时候，会根据控制器类中某个方法的注释来解析并创建路由树。
+
+Context 的设计方面，Beego 的 Context 是藏在 controller 结构中的，而不是每个函数的第一个参数带着 Context，这个和现在 Golang 提倡的“函数第一个参数为 Context”的规范是有些不同的，可能也是因为 Beego 出现的时间比较早。
+
+在功能完备性方面，Beego 框架提供了很多周边的功能。比如 Beego 提供了一个原生的 ORM 框架、自定义的 Logger 库、参数验证 Validate 库，甚至还默认提供了管理 GC、Goroutine 等管理接口。
+![](_images/5-9.jpg)
+总体来说，使用 Beego 的最大感受就是“全”。这是一个很全的框架，开发 Web 应用所需要的所有组件基本都能在这里找到，<u>如果选择它做业务开发，功能完备性是最重要的因素。</u>所以在从零开始，希望快速开发的场景中，我们会尽量选择使用这个框架。
+
+##### Echo
+
+Echo 框架目前最新版本是 v4.0.0。它的底层也是基于 net/http，但并没有提供类似 Beego 通过信号的 Graceful 启动方式，而是暴露标准库的 ShutDown 方法进行请求的关闭接口，具体使用的方式是开关还是配置，都交由使用者决定。
+
+在路由方面，Echo 的路由也是使用字典树的结构。和 Beego 的树不同，它并不是为每个 HTTP 方法建立一个树，而是只整体建立一个树，在叶子节点中，根据不同的 HTTP 方法存放了不同的控制处理函数，所以你可以在它的叶子节点中看到如下这么一个 methodHandler 结构：
+![](_images/5-10.jpg)
+
+Echo 也封装了自己的 Context 接口，提供了一系列像 JSON、Validate、Bind 等很好用的对 request 和 response 的封装。
+
+相较于 Beego 库，Echo 库非常轻量，除了基本的路由、Context 之外，大部分功能都以 Middleware 的形式提供出来。Echo 的 Middleware 是一个 echo.MiddlewareFunc 结构体的无参数函数。在框架的 middleware 文件夹中，提供了诸如 logger、jwt、csrf 等中间件。
+![](_images/001.jpg)
+
+总体来说，<u>Echo 的使用者更看中扩展性和框架性能。</u>和定位一样，它是一种高性能、可扩展、轻量级的 Web 框架，但麻雀虽小，五脏俱全。目前看起来，它的社区活跃度比 Gin 框架稍差一些（从两者的中间件贡献数可以看出）。所以我感觉，Echo 框架更适合个人开发者，而且需要有一定的扩展框架能力。
+
+##### Gin
+
+Gin 框架目前最新版本 1.7.2。它和 Echo 一样属于非常轻量级的应用，基本实现的就是 Web 框架最核心的部分。
+
+路由方面，和 Echo 一样使用字典树，但是又和 Echo/Beego 不一样的是，它的中间节点并不是斜杠分隔的请求路由，而是相同的字符串部分。
+
+比如下图左边的例子，/welcome 和 /welgood 会创建一个中间节点 (/wel) 和两个叶子节点 (come) 和 (good)，而且并不是只有叶子节点才包含控制器处理函数，中间节点也可能存在控制器节点函数。比如下图的右边例子，/welcome 和 /welcome2 包含中间节点 (/welcome) 和叶子节点 (2)，中间节点 /welcome 也包含了一个处理函数。
+![](_images/0-01.jpg)
+
+Gin 的路由还有一个特色就是，使用索引来加速子树查询效率。再看图中左边的例子，/wel 中间节点还带着一个索引 cg，代表的是子树的第一个字母。所以路由查找的时候，会先去索引 cg 中查找，当前路由除“/wel”的第一个字母，是否在索引中，如果在，索引的下标序列就代表第几个子树节点。
+
+不过，Gin 的路由并不是这个框架作者原创的，使用的是第三方的 httprouter 包。Gin 使用这个核心包的方法也不是直接 import 第三方包，而是将其 copy 进自己的代码库，当然可以这么用也是因为 httprouter 第三方库使用的是 BSD 这种有很大自由度的许可证协议。
+
+Context 基本就和 Echo/Beego 的设计一样，自己封装了 Context 结构。但是，Gin 的 Context 结构实现了标准库定义的 Context 接口，即 Deadline、Done 等接口。所以按照 Golang 中定义的鸭子类型概念（长得像鸭子，那么就是鸭子），我们可以把 Gin 中的 Context 当作标准库的 Context 一样使用，这点在实际开发工作中是非常方便的。
+
+在中间件上，Gin 框架没有定义所有的 middleware，而是定义了 middleware 函数：
+```go
+
+HandlerFunc func(*Context)
+```
+链式加载和调用 middleware，并将这个 middleware 的具体实现开放给社区，设计了 [社区贡献 organizations](https://github.com/gin-contrib) ，让社区的开源贡献者把自己实现的中间件统一放在这个 organizations 中，提供给所有人使用，而 Gin 的核心代码及相关则放在另一个 organizations 中。这种为开源社区制定标准，并且不断推进和审核开源贡献代码的做法，也是 Gin 社区活跃度如此之高的原因之一。
+![](_images/0-02.jpg)
+
+总体来说，<u>Gin 比较适合企业级团队使用。</u>它的社区活跃度较高，社区贡献的功能模块较多，能很好补充其功能完备性；同时 Gin 的扩展性也很好，我们可以在社区贡献模块和自研模块中做出很好的取舍。
+
+#### 你理想的框架是什么样的
+
+其实从刚才的分析也可以看出来，这个问题是见仁见智的，和你的工作经验、技术阅历、甚至技术的理念都有关系。有的人追求的是世界上运行速度最快的框架；有的人追求的是灵活性最高的框架；有的人追求的是功能最全的框架。
+
+具体你要根据自己的应用场景来选择，包括你 Web 应用的业务场景、并发需求、团队规模、工期等等。回看刚才提出的五个选择维度，以我们聊过的三个 Web 框架为例。
+
+在保证框架的核心模块能满足要求的情况下，我们一般在功能完备性和框架扩展性之间取舍。
+
+<u>如果你开发一个运营管理后台，并发量基本在 100 以下，单机使用，开发的团队规模可能就 1～2 个人，那你最应该考虑功能完备性，明显使用 Beego 的收益会远远大于使用 Gin 和 Echo。因为如果你选择 Gin 和 Echo 之后，还会遇到比如应该选用哪种 ORM、应该选用哪种缓存等一系列问题，而这些在功能组件相当全面的 Beego 中早就被定义好了.</u>
+
+<u>如果你有一定的团队规模，有比较高的并发量，而且你感觉后续对框架的改动需求或者扩展需求会很高，比如你希望自己开发一个适合团队使用的缓存方法。那么这个时候，你应该把框架扩展性放在最高级，可能 Gin 和 Echo 更适合你。如果你要更多的灵活性，你可能会考虑直接从 net/http 标准库开始，不使用任何的开源 Web 框架。</u>
+
+#### 小结
+
+我们今天尝试通过回答两个分问题，来思考一个终极问题，理想框架究竟应该是什么样的。
+
+对第一个分问题如何比较开源框架，我们提出了五个维度，按照优先级顺序依次为：核心模块、功能完备性、框架扩展性、框架性能、文档完备度及社区活跃度。然后从这五个维度，简要分析了现在最流行的三个开源框架 Beego、Gin 和 Echo。
+
+最后我们回到终极问题，探讨我们理想中的框架应该是什么样子的？总结一句话就是，在搞清楚真正的业务需求后，选最合适的框架就可以了。把握好这一点，你今后在遇到框架选择问题的时候，就不会太迷茫。
+
+### 8/9.自研or借力：集成Gin替换已有核心
+
+不知道你有没有这些疑问，我们的框架和这些顶级的框架相比，差了什么呢？如何才能快速地把我们的框架可用性，和这些框架提升到同一个级别？我们做这个框架除了演示每个实现细节，它的优势是什么呢？
+
+不妨带着这些问题，把我们新出炉的框架和 GitHub 上 star 数最高的[Gin](https://github.com/gin-gonic/gin) 框架比对一下，思考下之间的差距到底是什么。
+
+#### 和 Gin 对比
+
+Gin 框架无疑是现在最火的框架，你能想出很多它的好处，但是在我看来，它之所以那么成功，最主要的原因在于两点：细节和生态。
+
+其实框架之间的实现原理都差不多，但是生产级别的框架和我们写的示例级别的框架相比，差别就在于细节，这个细节是需要很多人、很多时间去不断打磨的。
+
+如果你的 Golang 经验积累到一定时间，那肯定能很轻松实现一个示例级别的框架，但是往往是没有开源市场的，因为你的框架，在细节上的设计没有经过很多人验证，也没有经过在生产环境中的实战。这些都需要一个较为庞大的使用群体和较长时间才能慢慢打磨出来。
+
+Gin 里面的每一行代码，基本都是在很长时间里，经过各个贡献者的打磨，才演变至今的。我们看 Gin 框架的代码优化和提交频率，从这一讲落笔算起（2021 年 8 月 9 日），最近的一次提交改进是 6 天前（2021 年 8 月 3 日），Gin 框架升级到了 v1.7.3 版本。
+
+我们也可以统计一下 Gin 的 master 分支，从 2014 开始至今已经有 1475 次优化提交。这里的每一次优化提交，都是对 Gin 框架细节的再一次打磨。
+
+##### Recovery 的错误捕获
+
+还记得在第四课的时候，我们实现了一个 Recovery 中间件么？放在框架 middleware 文件夹的 recovery.go 中：
+```go
+
+// recovery 机制，将协程中的函数异常进行捕获
+func Recovery() framework.ControllerHandler {
+  // 使用函数回调
+  return func(c *framework.Context) error {
+    // 核心在增加这个 recover 机制，捕获 c.Next()出现的 panic
+    defer func() {
+      if err := recover(); err != nil {
+        c.Json(500, err)
+      }
+    }()
+    // 使用 next 执行具体的业务逻辑
+    c.Next()
+
+    return nil
+  }
+}
+```
+这个中间件的作用是捕获协程中的函数异常。我们使用 defer、recover 函数，捕获了 c.Next 中抛出的异常，并且在 HTTP 请求中返回 500 内部错误的状态码。
+
+乍看这段代码，是没有什么问题的。但是我们再仔细思考下是否有需要完善的细节？
+
+首先是异常类型，我们原先认为，所有异常都可以通过状态码，直接将异常状态返回给调用方，但是这里是有问题的。这里的异常，除了业务逻辑的异常，是不是也有可能是底层连接的异常？
+
+以底层连接中断异常为例，对于这种连接中断，我们是没有办法通过设置 HTTP 状态码来让浏览器感知的，并且一旦中断，后续的所有业务逻辑都没有什么作用了。同时，如果我们持续给已经中断的连接发送请求，会在底层持续显示网络连接错误（broken pipe）。
+
+所以在遇到这种底层连接异常的时候，应该直接中断后续逻辑。来看看 Gin 对于连接中断的捕获是怎么处理的。（你可以查看 Gin 的 Recovery [GitHub 地址](https://github.com/gin-gonic/gin/blob/master/recovery.go)）
+```go
+
+return func(c *Context) {
+    defer func() {
+      if err := recover(); err != nil {
+        // 判断是否是底层连接异常，如果是的话，则标记 brokenPipe
+        var brokenPipe bool
+        if ne, ok := err.(*net.OpError); ok {
+          if se, ok := ne.Err.(*os.SyscallError); ok {
+            if strings.Contains(strings.ToLower(se.Error()), "broken pipe") || strings.Contains(strings.ToLower(se.Error()), "connection reset by peer") {
+              brokenPipe = true
+            }
+          }
+        }
+        ...
+
+                
+        if brokenPipe {
+          // 如果有标记位，我们不能写任何的状态码
+          c.Error(err.(error)) // nolint: errcheck
+          c.Abort()
+        } else {
+          handle(c, err)
+        }
+      }
+    }()
+    c.Next()
+  }
+```
+这段代码先判断了底层抛出的异常是否是网络异常（net.OpError），如果是的话，再根据异常内容是否包含“broken pipe”或者“connection reset by peer”，来判断这个异常是否是连接中断的异常。如果是，就设置标记位，并且直接使用 c.Abort() 来中断后续的处理逻辑。
+
+这个处理异常的逻辑可以说是非常细节了，区分了网络连接错误的异常和普通的逻辑异常，并且进行了不同的处理逻辑。这一点，可能是绝大多数的开发者都没有考虑到的。
+
+##### Recovery 的日志打印
+
+我们再看下 Recovery 的日志打印部分，也非常能体现出 Gin 框架对细节的考量。
+
+当然在第四讲我们只是完成了最基础的部分，没有考虑到打印 Recovery 捕获到的异常，不妨在这里先试想下，如果是自己实现，你会如何打印这个异常呢？如果你有想法了，我们再来对比看看 Gin 是如何实现这个异常信息打印的 ([GitHub 地址](https://github.com/gin-gonic/gin/blob/master/recovery.go))。
+
+首先，打印异常内容是一定得有的。这里直接使用 logger.Printf 就可以打印出来了。
+```go
+logger.Printf("%s\n%s%s", err, ...)
+```
+其次，异常是由某个请求触发的，所以触发这个异常的请求内容，也是必要的调试信息，需要打印。
+```go
+
+httpRequest, _ := httputil.DumpRequest(c.Request, false)
+headers := strings.Split(string(httpRequest), "\r\n")
+// 如果 header 头中有认证信息，隐藏，不打印。
+for idx, header := range headers {
+current := strings.Split(header, ":")
+  if current[0] == "Authorization" {
+      headers[idx] = current[0] + ": *"
+  }
+}
+headersToStr := strings.Join(headers, "\r\n")
+```
+分析一下这段代码，Gin 使用了一个 DumpRequest 来输出请求中的数据，包括了 HTTP header 头和 HTTP Body。
+
+这里值得注意的是，为了安全考虑 Gin 还注意到了，如果请求头中包含 Authorization 字段，即包含 HTTP 请求认证信息，在输出的地方会进行隐藏处理，不会由于 panic 就把请求的认证信息输出在日志中。这一个细节，可能大多数开发者也都没有考虑到。
+
+最后看堆栈信息打印，Gin 也有其特别的实现。我们打印堆栈一般是使用 [runtime 库的 Caller](https://pkg.go.dev/runtime@go1.17.1#Caller) 来打印：
+```go
+
+// 打印堆栈信息，是否有这个堆栈
+func Caller(skip int) (pc uintptr, file string, line int, ok bool)
+```
+caller 方法返回的是堆栈函数所在的函数指针、文件名、函数所在行号信息。但是在使用过程中你就会发现，使用 Caller 是打印不出真实代码的。
+
+比如下面这个例子，我们使用 Caller 方法，将文件名、行号、堆栈函数打印出来：
+```go
+
+// 在 prog.go 文件，main 库中调用 call 方法
+func call(skip int) bool {   //24 行
+  pc,file,line,ok := runtime.Caller(skip) //25 行
+  pcName := runtime.FuncForPC(pc).Name()  //26 行
+  fmt.Println(fmt.Sprintf("%v %s %d %s",pc,file,line,pcName)) //27 行
+  return ok //28 行
+} //29 行
+```
+打印出的第一层堆栈函数的信息:
+```go
+
+4821380 /tmp/sandbox064396492/prog.go 25 main.call
+```
+这个堆栈信息并不友好，它告诉我们，第一层信息所在地址为 prog.go 文件的第 25 行，在 main 库的 call 函数里面。所以如果想了解下第 25 行有什么内容，用这个堆栈信息去源码中进行文本查找，是做不到的。这个时候就非常希望信息能打印出具体的真实代码。
+
+在 Gin 中，打印堆栈的时候就有这么一个逻辑：先去本地查找是否有这个源代码文件，如果有的话，获取堆栈所在的代码行数，将这个代码行数直接打印到控制台中。
+```go
+
+// 打印具体的堆栈信息
+func stack(skip int) []byte {
+  ...
+    // 循环从第 skip 层堆栈到最后一层
+  for i := skip; ; i++ { 
+    pc, file, line, ok := runtime.Caller(i)
+    // 获取堆栈函数所在源文件
+    if file != lastFile {
+      data, err := ioutil.ReadFile(file)
+      if err != nil {
+        continue
+      }
+      lines = bytes.Split(data, []byte{'\n'})
+      lastFile = file
+    }
+        // 打印源代码的内容
+    fmt.Fprintf(buf, "\t%s: %s\n", function(pc), source(lines, line))
+  }
+  return buf.Bytes()
+}
+
+```
+这样，打印出来的堆栈信息形如：/Users/yejianfeng/Documents/gopath/pkg/mod/github.com/gin-gonic/gin@v1.7.2/context.go:165 (0x1385b5a) (*Context).Next: c.handlers[c.index](c)
+```go
+/Users/yejianfeng/Documents/gopath/pkg/mod/github.com/gin-gonic/gin@v1.7.2/context.go:165 (0x1385b5a)
+        (*Context).Next: c.handlers[c.index](c)
+```
+这个堆栈信息就友好多了，它告诉我们，这个堆栈函数发生在文件的 165 行，它的代码为 c.handlersc.index， 这行代码所在的父级别函数为 (*Context).Next。
+
+最终，Gin 打印出来的 panic 信息形式如下：
+```bash
+
+2021/08/15 14:18:57 [Recovery] 2021/08/15 - 14:18:57 panic recovered:
+GET /first HTTP/1.1
+Host: localhost:8080
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/ *;q=0.8,application/signed-exchange;v=b3;q=0.9
+Accept-Encoding: gzip, deflate, br
+...
+User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.131 Safari/537.36
+
+
+
+%!s(int=121321321)
+/Users/yejianfeng/Documents/UGit/gindemo/main.go:19 (0x1394214)
+        main.func1: panic(121321321)
+/Users/yejianfeng/Documents/gopath/pkg/mod/github.com/gin-gonic/gin@v1.7.2/context.go:165 (0x1385b5a)
+        (*Context).Next: c.handlers[c.index](c)
+/Users/yejianfeng/Documents/gopath/pkg/mod/github.com/gin-gonic/gin@v1.7.2/recovery.go:99 (0x1392c48)
+        CustomRecoveryWithWriter.func1: c.Next()
+/Users/yejianfeng/Documents/gopath/pkg/mod/github.com/gin-gonic/gin@v1.7.2/context.go:165 (0x1385b5a)
+        (*Context).Next: c.handlers[c.index](c)
+...
+/usr/local/Cellar/go/1.15.5/libexec/src/net/http/server.go:1925 (0x12494ac)
+        (*conn).serve: serverHandler{c.server}.ServeHTTP(w, w.req)
+/usr/local/Cellar/go/1.15.5/libexec/src/runtime/asm_amd64.s:1374 (0x106bb00)
+        goexit: BYTE    $0x90   // NOP
+```
+可以说这个调试信息就非常丰富了，对我们在实际工作中的调试会有非常大的帮助。但是这些丰富的细节都是在开源过程中，不断补充起来的。
+
+##### 路由对比
+
+在第三节课使用 trie 树实现了一个路由，它的每一个节点是一个 segment。
+
+而 Gin 框架的路由选用的是一种压缩后的基数树（radix tree），它和我们之前实现的 trie 树相比最大的区别在于，它并不是把按照分隔符切割的 segment 作为一个节点，而是把整个 URL 当作字符串，尽可能匹配相同的字符串作为公共前缀。
+
+为什么 Gin 选了这个模型？其实 radix tree 和 trie 树相比，最大的区别就在于它节点的压缩比例最大化。直观比较上面两个图就能看得出来，对于 URL 比较长的路由规则，trie 树的节点数就比 radix tree 的节点数更多，整个数的层级也更深。
+
+针对路由这种功能模块，创建路由树的频率远低于查找路由点频率，那么减少节点层级，无异于能提高查找路由的效率，整体路由模块的性能也能得到提高，所以 Gin 用 radix tree 是更好的选择。
+
+另外在路由查找中，Gin 也有一些细节做得很好。首先，从父节点查找子节点，并不是像我们之前实现的那样，通过遍历所有子节点来查找是否有子节点。Gin 在每个 node 节点保留一个 indices 字符串，这个字符串的每个字符代表子节点的第一个字符：
+
+在 Gin 源码的[tree.go](https://github.com/gin-gonic/gin/blob/master/tree.go)中可以看到。
+```go
+// node 节点
+type node struct {
+  path      string
+  indices   string  // 子节点的第一个字符
+  ...
+  children  []*node // 子节点
+    ...
+}
+```
+这个设计是为了加速子节点的查询效率。使用 Hash 查找的时间复杂度为 O(1)，而我们使用遍历子节点的方式进行查找的效率为 O(n)。
+
+在拼接 indices 字符串的时候，这里 Gin 还有一个代码方面的细节值得注意，在 tree.go 中有一段这样的代码：
+```go
+
+   path = path[i:]
+  c := path[0]
+
+  ...
+  // 插入子节点
+  if c != ':' && c != '*' && n.nType != catchAll {
+    // []byte for proper unicode char conversion, see #65
+        // 将字符串拼接进入 indices
+    n.indices += bytesconv.BytesToString([]byte{c})
+    ...
+    n.addChild(child)
+    ...
+```
+将字符 c 拼接进入 indices 的时候，使用了一个 bytesconv.BytesToString 方法来将字符 c 转换为 string。你可以先想想，这里为什么不使用 string 关键字直接转换呢？
+
+因为在 Golang 中，string 转化为 byte 数组，以及 byte 数组转换为 string ，都是有内存消耗的。以 byte 数组使用关键字 string 转换为字符串为例，Golang 会先在内存空间中重新开辟一段字符串空间，然后将 byte 数组复制进入这个字符串空间，这样不管是在内存使用的效率，还是在 CPU 资源使用的效率上，都存在一定消耗。
+
+而在 Gin 的第 [#2206](https://github.com/gin-gonic/gin/pull/2206/files) 号提交中，有开源贡献者就使用自研的 bytesconv 包，将 Gin 中的字符数组和 string 的转换统一做了一次修改。
+```go
+
+package bytesconv
+
+// 字符串转化为字符数组，不需要创建新的内存
+func StringToBytes(s string) []byte {
+  return *(*[]byte)(unsafe.Pointer(
+    &struct {
+      string
+      Cap int
+    }{s, len(s)},
+  ))
+}
+
+// 字符数组转换为字符串，不需要创建新的内存
+func BytesToString(b []byte) string {
+  return *(*string)(unsafe.Pointer(&b))
+}
+```
+bytesconv 包的原理就是，直接使用 unsafe.Pointer 来强制转换字符串或者字符数组的类型。
+
+这些细节的修改，一定程度上减少了 Gin 包内路由的内存占用空间。类似的细节点还有很多，需要每一行代码琢磨过去，而且这里的每一个细节优化点都是，开源贡献者在生产环境中长期使用 Gin 才提炼出来的。
+
+不要小看这些看似非常细小的修改。因为细节往往是积少成多的，所有的这些细节逐渐优化、逐渐完善，才让 Gin 框架的实用度得到持久的提升，和其他框架的差距就逐渐体现出来了，这样才让 Gin 框架成了生产环境中首选的框架。
+
+#### 生态
+
+你肯定有点疑惑，为什么我会把生态这个点单独拿出来说，难道生态不是由于框架的质量好而附带的生态繁荣吗？
+
+其实不然。一个开源项目的成功，最重要的是两个事情，第一个是质量，开源项目的代码质量是摆在第一位的，但是还有一个是不能被忽略的：生态的完善。
+
+一个好的开源框架项目，不仅仅只有代码，还需要围绕着核心代码打造文档、框架扩展、辅助命令等。这些代码周边的组件和功能的打造，虽然从难度上看，并没有核心代码那么重要，但是它是一个长期推进和完善的过程。
+
+Gin 的整个生态环境是非常优质的，在开源中间件、社区上都能看到其优势。
+
+2014 年至今 Gin 已有多个开源共享者为其共享了开源中间件，目前[官方 GitHub](https://github.com/orgs/gin-contrib/repositories)组织收录的中间件有 23 个，非收录官方，但是在官方 README记录的也有 45 个。
+
+这些中间件包含了 Web 开发各个方面的功能，比如提供跨域请求的 cors 中间件、提供本地缓存的 cache 中间件、集成了 pprof 工具的 pprof 中间件、自动生成全链路 trace 的 opengintracing 中间件等等。如果你用一个自己的框架，就需要重建生态一一开发，这是非常烦琐的，而且工作量巨大。
+
+Gin 的 GitHub 官网的社区活跃度比较高，对于已有的一些问题，在官网的 issue 提出来立刻就会有人回复，在 Google 或者 Baidu 上搜索 Gin，也会有很多资料。所以对于工作中必然会出现的问题，我们可以在网络上很方便找寻到这个框架的解决办法。这也是 Gin 大受欢迎的原因之一。
+
+其实除了 Gin 框架，我们可以从不少其他语言的框架中看到生态的重要性。比如前端的 Vue 框架，它不仅仅提供了最核心的 Vue 的框架代码，还提供了脚手架工具 Vue-CLI、Vue 的 Chrome 插件、Vue 的官方论坛和聊天室、Vue 的示例文档 Cookbook。这些周边生态对 Vue 框架的成功起到了至关重要的作用。
+
+##### 站在巨人的肩膀才能做得更好
+
+如果是为了学习，我们之前从零自己边造轮子边学是个好方法；但是如果你的目标是工业使用，那从零开始就非常不明智了
+
+因为在现在的技术氛围下，开源早已成为了共识。互联网的开源社区早就有我们需要的各个成形零件，我们要做的是，使用这些零件来继续开发。在 Golang Web 框架这个领域也是一样的，如果是想从头开始制造框架，除非你后面有很强大的团队在支撑，否则写出来的框架不仅没有市场，可能连实用性也会受到质疑。
+
+其实很多市面上的框架，也都是基于已有的轮子来再开发的。就拿 Gin 框架本身来说吧，它的路由是基于 httprouter 这个项目来定制化修改的；再比如 Macaron 框架，它是基于 Martini 框架的设计实现的。它们都是在原有的开源项目基础上，按照自己的设计思路重新改造的，也都获得了成功。
+
+而且从我的个人经验来看，那些从头开始所有框架功能都是由自己开发的同学，往往很难坚持下来。所以你现在是不是明白了，为什么在课程最开始会说，我们先从零搭建出框架的核心部分，然后基于 Gin 来做进一步拓展和完善。
+
+因为我们希望通过这门课花大力气搭建出来的 Golang Web 框架，不只是一个示例级别的框架，而是真正能用到具体工作环境中的，要做
+
+#### 小结
+
+今天通过对比 Gin 框架和我们之前设计的框架间的细节，展示了一个成熟的生产级别的框架与一个示例级别框架在细节上的距离。
+
+现代框架的理念不在于实现，而更多在于组合。基于某些基础组件或者基础实现，不断按照自己或者公司的需求，进行二次改造和二次开发，从而打造出适合需求的形态。
+
+比如 PHP 领域的 Laravel 框架，就是将各种底层组件、Symfony、Eloquent ORM、Monolog 等进行组装，而框架自身提供统一的组合调度方式；比如 Ruby 领域的 Rails 框架，整合了 Ruby 领域的各种优秀开源库，而框架的重点在于如何整理组件库、如何提供更便捷的机制，让程序员迅速解决问题。
+
+所以，接下来我们设计框架的思路，就要从之前的从零开始造轮子，转换为站在巨人的肩膀上了，会借用 Gin 框架来继续实现。准备好，下一讲我们就要开始动手改造了。
+
+#### 如何借力，讨论开源项目的许可协议
+
+我们后续会在这个以 Gin 为核心的新框架上，进行其余核心或者非核心框架模块的设计和开发，同时我们也需要找到比较好的方式，能将 Gin 生态中丰富的开源中间件进行复制和使用。
+
+这样借鉴其他框架或者其他库不是侵权行为吗？首先得了解开源许可证，并且知道可以对 Gin 框架做些什么操作？
+
+
+开源社区有非常多的开源项目，每个项目都需要有许可说明，包含：是否可以引用、是否允许修改、是否允许商用等。目前的开源许可证有非常多种，每个许可证都是一份使用这个开源项目需要遵守的协议，而主流的开源许可证在 OSI 组织（开放源代码促进会）都有 [登记(https://opensource.org/licenses) 。最主流的开源许可证有 6 种：Apache、BSD、GPL、LGPL、MIT、Mozillia。
+
+BSD 许可证、MIT 许可证和 Apache 许可证属于三个比较宽松的许可，都允许对源代码进行修改，且可以在闭源软件中使用，区别在于对新的修改，是否必须使用原先的许可证格式，以及修改后的软件是否能以原软件的名义进行销售等。
+
+我们这里重点讲一下 Gin 框架使用的 [MIT 开源许可证](https://github.com/gin-gonic/gin/blob/master/LICENSE) ，这个许可证内容非常简单，对使用者的要求也最低。
+
+- 允许被许可人使用、复制、修改、合并、出版发行、散布、再许可、售卖软件及软件副本。
+- 唯一条件是在软件和软件副本中必须包含著作权声明和本许可声明。
+
+所以<u>如果软件用的是 MIT 许可证，不管你开发的项目是开源的，还是商业闭源的，都可以放心使用这个软件，只需要在软件中包含著作权声明和许可协议声明就行，且不要求新的文件必须使用 MIT 协议。</u>
+
+以使用了 MIT 协议的 Gin 框架为例，你可以在新项目中以引用或者复制的形式，使用 Gin 框架，也允许你在复制的 Gin 框架中进行修改，修改可以不用注明 Gin 的版权，但是非修改部分是需要包含版权声明的。
+
+所以，如果我们使用复制形式使用 Gin 框架的话，需要在 Gin 框架每个文件的头部，增加上著作权和许可声明：
+```go
+// Copyright 2014 Manu Martinez-Almeida.  All rights reserved.
+// Use of this source code is governed by a MIT style
+// license that can be found in the LICENSE file.
+```
+
+#### 如何将 Gin 迁移进入我们的框架
+
+首先确定 Gin 的迁移版本，截止到目前（2021 年 8 月 14 日）最新的 Gin 版本为 1.7.3，所以我们将 Gin 的版本确定为 [1.7.3](https://github.com/gin-gonic/gin/releases/tag/v1.7.3) 。
+
+<u>在 Golang 中，要在一个项目中引入另外一个项目，一般有两种做法，一种做法是把要引用的项目通过 go mod 引入到目标库中，而另外一种做法则费劲的多，使用复制源码的方式引入要引用的项目。</u>
+
+go mod 是 Go 官方提供的第三方库管理工具。go mod 的使用方式是在代码方面，也就是在你要使用第三方库功能的时候，使用 import 关键字进行引用。它的好处是简单方便，我们直接使用官方提供的 go get 方法，就能将某个框架进行使用和升级。
+
+但是如果希望对第三方库进行源码级别的修改，go mod 的方式就会受到限制了。比如我们使用了 Gin 项目，想扩展项目中的 Context 这个结构，为其增加一个函数方法 A，这个需求用 go mod 的方式是做不到的。
+
+go mod 的方式提倡的是“使用第三方库”而不是“定制第三方库”。所以对于很强的定制第三方库的需求，我们只能选择复制源码的方式。
+
+有的同学可能会觉得这种源码复制的方式有点奇怪，但是这种复制出来，再进行定制化的方式，其实在一些项目中是常常可以见到的。
+
+比如 Gin 框架在使用 httprouter 的时候，由于要对其进行深度定制化和优化，所以直接将 httprouter 的代码以复制的方式引入到自己的项目中；上一讲简单提过，比较成功的开源项目 macaron ，在项目的最初期也是参考另外一个项目 martini ，将 martini 中的一些源码拷贝后进行优化。我们还能在这两个项目的某些代码文件中看到对第三方库的版权申明。
+
+由于我们对 Gin 框架有深度定制改造的需求，所以接下来也采用源码复制的方式引入 Gin 框架。首先将 Gin1.7.3 的源码完整复制进入项目，存放在 framework 目录中创建一个 gin 目录。
+![](_images/0-03.jpg)
+
+复制之后需要做两步操作：
+
+- 将 Gin 目录下的 go.mod 的内容放在项目目录下
+
+既然我们以复制源码的方式引入了 Gin，那么 Gin 的地址就成为我们项目中的一部分，它就不是一个有 go.mod 的第三方库了，而 Gin 原本引入的第三方库，成为了我们项目所需要的第三方库。所以第一步需要将 Gin 目录下的 go.mod 和 go.sum 删除，并且将 go.mod 的内容复制到项目的根目录中。
+
+- 将 Gin 中原有 Gin 库的引用地址，统一替换为当前项目的地址
+
+go.mod 中的 module 代表了当前项目的模块名称，而在项目的 go.mod 中，我们将我们这个框架的模块名称从“coredemo”修改为“github.com/gohade/hade”。在项目的 go.mod 文件：
+```go
+
+module github.com/gohade/hade
+
+go 1.15
+
+require (
+   ...
+)
+
+```
+其实这个 module 并不一定是 GitHub 上的一个项目地址，也可以自己定义的，我们之前用的 coredemo 就是一个自定义的字符串。但是开源项目的普遍做法是，将模块名定义为你的开源地址名称，这样能让开源项目使用者在导入包的时候，直接根据模块名查找到对应文件。
+
+所有第三方引用在查询时，go.mod 中的当前模块名称为 github.com/gohade/hade，那么复制过来之后，对应的 Gin 框架的引用地址就是 github.com/gohade/hade/framework/gin，而 Gin 框架之前 go.mod 中的模块名称为 github.com/gin-gonic/gin。
+
+所以我们这里要做一次统一替换，将之前 Gin 框架中的所有引用 github.com/gin-gonic/gin 的地方替换为 github.com/gohade/hade/framework/gin。
+
+比如：
+```go
+
+"github.com/gin-gonic/gin/binding"  替换为 "github.com/gohade/hade/framework/gin/binding"
+"github.com/gin-gonic/gin/render"  替换为 "github.com/gohade/hade/framework/gin/render"
+```
+做完上述两步的操作之后，我们的项目 github.com/gohade/hade 就包含了 Gin 1.3.7 了。下面就是重头戏了，需要思考如何将之前研发的定制化功能迁移到 Gin 上。
+
+##### 如何迁移
+
+首先，梳理下目前已经实现的模块：
+
+- Context：请求控制器，控制每个请求的超时等逻辑；
+- 路由：让请求更快寻找目标函数，并且支持通配符、分组等方式制定路由规则；
+- 中间件：能将通用逻辑转化为中间件，并串联中间件实现业务逻辑；
+- 封装：提供易用的逻辑，把 request 和 response 封装在 Context 结构中；
+- 重启：实现优雅关闭机制，让服务可以重启。
+
+在 Gin 的框架中，Context、路由、中间件，都已经有了 Gin 自己的实现，而且我们从源码上分析了细节。
+
+Context 方面，Gin 的实现基本和我们之前的实现是一致的。之前实现的 Core 数据结构对应 Gin 中的 Engine，Group 数据结构对应 Gin 的 Group 结构，Context 数据结构对应 Gin 的 Context 数据结构。
+
+路由方面，Gin 的路由实现得比我们要好，这一点上一节课详细分析了 Gin 路由就不再赘述。
+
+中间件方面，Gin 的中间件实现和我们之前的没有什么太大的差别，只有一点，我们定义的 Handler 为：
+```go
+
+type ControllerHandler func(c *Context) error
+```
+而 Gin 定义的 Handler 为：
+```go
+
+type HandlerFunc func(*Context)
+```
+可以看到相比 Gin，我们多定义了一个 error 返回值。因为 Gin 的作者认为，中断一个请求返回一个 error 并没有什么用，他希望中断一个请求的时候直接操作 Response，比如设置返回状态码、设置返回错误信息，而不希望用 error 来进行返回，所以框架也不会用这个 error 来操作任何的返回信息。这一点我认为 Gin 框架的考量是有道理的，所以我们也沿用这种方式。
+
+而对于 Request 和 Response 的封装， Gin 的实现比较简陋。Gin 对 Request 并没有以接口的方式，将 Request 支持哪些接口展示出来；并且在参数查询的时候，返回类型并不多，比如从 Form 中获取参数的系列方法，Gin 只实现了几个方法：
+```go
+
+PostForm
+DefaultPostForm
+GetPostForm
+PostFormArray
+GetPostFormArray
+PostFormMap
+GetPostFormMap
+```
+但是在我们定义的 Request 中，我们实现了按照不同类型获取参数的方法。
+```go
+
+// form表单中带的参数
+DefaultFormInt(key string, def int) (int, bool)
+DefaultFormInt64(key string, def int64) (int64, bool)
+DefaultFormFloat64(key string, def float64) (float64, bool)
+DefaultFormFloat32(key string, def float32) (float32, bool)
+DefaultFormBool(key string, def bool) (bool, bool)
+DefaultFormString(key string, def string) (string, bool)
+DefaultFormStringSlice(key string, def []string) ([]string, bool)
+DefaultFormFile(key string) (*multipart.FileHeader, error)
+DefaultForm(key string) interface{}
+```
+而且在 Response 中，我们的设计是带有链式调用方法的，而 Gin 中没有。
+```go
+
+c.SetOkStatus().Json("ok, UserLoginController: " + foo)
+```
+这两点在使用者使用框架开发具体业务的时候会非常便利，所以我们将这些功能集成到 Gin 中，迁移这部分 Request 和 Response 的封装。
+
+最后一个优雅关闭的逻辑，我们和 Gin 都是直接使用 HTTP 库的 server.Shutdown 实现的，不受 Gin 代码迁移的影响。
+
+所以再明确下，context、路由、中间件、重启机制，我们都不需要迁移，唯一需要迁移的是对 Request 和 Response 的封装。
+
+##### 使用加法最小化和定制化我们的需求
+
+对于 request 和 response 的封装，涉及易用性，我们希望能保留自己的定制化需求，同时又不希望影响 Gin 原有的代码逻辑。所以，可以用加法最小化的方式迁移这个封装。
+
+为了尽量不侵入原有的文件，我们创建两个新的文件 hade_request.go、hade_response.go 来存放之前对 request 和 response 的封装。
+
+回顾下第五节课封装的 request，定义的 IRequest 接口包含：通过地址 URL 获取参数的 QueryXXX 系列接口、通过路由匹配获取参数的 ParamXXX 系列接口、通过 Form 表单获取参数的 FormXXX 系列接口，以及一些基础接口。
+
+所以现在的目标是，要让 Gin 框架的 Context 也实现这些接口。对比之前写的和 Gin 框架原有的实现方法，可以发现，接口存在下列三种情况：
+
+1. Gin 框架中已经存在相同参数、相同返回值、相同接口名的接口
+2. Gin 框架中不存在相同接口名的接口
+3. Gin 框架中存在相同接口名，但是不同返回值的接口
+
+第一种情况，由于 Gin 框架原先就已经有了相同的接口，所以不需要做任何迁移动作，Gin 的 Context 就已经具备了我们设计的封装。对第二种情况来说，由于 Gin 框架没有对应接口，我们把之前实现的接口原封不动迁移过来即可。
+
+对于第三种情况则棘手一些。以 Gin 中已经有的 QueryXXX 系列接口为例，它的 QueryXXX 系列接口和我们想要的有一定差别，比如它的 Query 不支持多种数据类型的直接获取。怎么办？
+
+可以选择将 QueryXXX 系列接口重新命名，又因为 Query 接口都带有一个默认值，所以我们将其重新命名为 DefaultQueryXXX。
+
+经过上述三种情况的修改，IRequest 的定义修改为 (在框架目录的 framework/gin/hade_request.go 中)：
+```go
+
+// 代表请求包含的方法
+type IRequest interface {
+
+  // 请求地址url中带的参数
+  // 形如: foo.com?a=1&b=bar&c[]=bar
+  DefaultQueryInt(key string, def int) (int, bool)
+  DefaultQueryInt64(key string, def int64) (int64, bool)
+  DefaultQueryFloat64(key string, def float64) (float64, bool)
+  DefaultQueryFloat32(key string, def float32) (float32, bool)
+  DefaultQueryBool(key string, def bool) (bool, bool)
+  DefaultQueryString(key string, def string) (string, bool)
+  DefaultQueryStringSlice(key string, def []string) ([]string, bool)
+
+  // 路由匹配中带的参数
+  // 形如 /book/:id
+  DefaultParamInt(key string, def int) (int, bool)
+  DefaultParamInt64(key string, def int64) (int64, bool)
+  DefaultParamFloat64(key string, def float64) (float64, bool)
+  DefaultParamFloat32(key string, def float32) (float32, bool)
+  DefaultParamBool(key string, def bool) (bool, bool)
+  DefaultParamString(key string, def string) (string, bool)
+  DefaultParam(key string) interface{}
+
+  // form表单中带的参数
+  DefaultFormInt(key string, def int) (int, bool)
+  DefaultFormInt64(key string, def int64) (int64, bool)
+  DefaultFormFloat64(key string, def float64) (float64, bool)
+  DefaultFormFloat32(key string, def float32) (float32, bool)
+  DefaultFormBool(key string, def bool) (bool, bool)
+  DefaultFormString(key string, def string) (string, bool)
+  DefaultFormStringSlice(key string, def []string) ([]string, bool)
+  DefaultFormFile(key string) (*multipart.FileHeader, error)
+  DefaultForm(key string) interface{}
+
+  // json body
+  BindJson(obj interface{}) error
+
+  // xml body
+  BindXml(obj interface{}) error
+
+  // 其他格式
+  GetRawData() ([]byte, error)
+
+  // 基础信息
+  Uri() string
+  Method() string
+  Host() string
+  ClientIp() string
+
+  // header
+  Headers() map[string]string
+  Header(key string) (string, bool)
+
+  // cookie
+  Cookies() map[string]string
+  Cookie(key string) (string, bool)
+}
+```
+IRequest 的封装就迁移完成了，对于我们封装的 IResponse 结构，也是同样的思路。
+
+和 Gin 的 response 实现对比之后，我们发现由于设计了一个链式调用，很多方法的返回值使用 IResponse 接口本身，所以大部分定义的 IResponse 的接口，在 Gin 中都有同样接口名，但是返回值不同。所以我们可以用同样的方式来修改接口名。
+
+因为大都返回 IResponse 接口，那么可以在所有接口名前面，加一个 I 字母作为区分。在 framework/gin/hade_response.go 中：
+```go
+
+// IResponse代表返回方法
+type IResponse interface {
+  // Json输出
+  IJson(obj interface{}) IResponse
+
+  // Jsonp输出
+  IJsonp(obj interface{}) IResponse
+
+  //xml输出
+  IXml(obj interface{}) IResponse
+
+  // html输出
+  IHtml(template string, obj interface{}) IResponse
+
+  // string
+  IText(format string, values ...interface{}) IResponse
+
+  // 重定向
+  IRedirect(path string) IResponse
+
+  // header
+  ISetHeader(key string, val string) IResponse
+
+  // Cookie
+  ISetCookie(key string, val string, maxAge int, path, domain string, secure, httpOnly bool) IResponse
+
+  // 设置状态码
+  ISetStatus(code int) IResponse
+
+  // 设置200状态
+  ISetOkStatus() IResponse
+}
+```
+现在 IRequest 和 IResponse 接口的修改已经完成了。
+
+下面我们就应该迁移每个接口的具体实现。这里接口的实现比较多，就不一一赘述，Request 和 Response 我们分别举其中一个接口例子进行说明，其他的接口迁移可以具体参考 GitHub 仓库的[geekbang/09 分支](https://github.com/gohade/coredemo/tree/geekbang/09)。
+
+在 Request 中我们定义了一个 DefaultQueryInt 方法，是 Gin 框架中没有的，怎么迁移这个接口呢？首先将之前定义的 QueryInt 迁移过来，并重新命名为 DefaultQueryInt。
+```go
+
+// 获取请求地址中所有参数
+func (ctx *Context) QueryAll() map[string][]string {
+   if ctx.request != nil {
+      return map[string][]string(ctx.request.URL.Query())
+   }
+   return map[string][]string{}
+}
+
+// 获取Int类型的请求参数
+func (ctx *Context) DefaultQueryInt(key string, def int) (int, bool) {
+   params := ctx.QueryAll()
+   if vals, ok := params[key]; ok {
+      if len(vals) > 0 {
+         // 使用cast库将string转换为Int
+         return cast.ToInt(vals[0]), true
+      }
+   }
+   return def, false
+}
+```
+然后这里看 QueryAll 函数，其实是可以优化的。Gin 框架在获取 QueryAll 的时候，使用了一个 QueryCache，实现了在第一次获取参数的时候，用方法 initQueryCache 将 ctx.request.URL.Query() 缓存在内存中。
+
+所以既然已经源码引入 Gin 框架了，我们也是可以使用这个方法来优化 QueryAll() 方法的，先调用 initQueryCache，再直接从 queryCache 中返回参数：
+```go
+
+// 获取请求地址中所有参数
+func (ctx *Context) QueryAll() map[string][]string {
+   ctx.initQueryCache()
+   return map[string][]string(ctx.queryCache)
+}
+```
+这样 QueryAll 方法和 DefaultQueryInt 方法就都迁移改造完成了。
+
+在 Response 中，我们没有需要优化的点，只要将代码迁移就行。比如原先定义的 Jsonp 方法：
+```go
+
+// Jsonp输出
+func (ctx *Context) Jsonp(obj interface{}) IResponse {
+   ...
+}
+```
+直接修改函数名为 IJsonp 即可：
+```go
+
+// Jsonp输出
+func (ctx *Context) IJsonp(obj interface{}) IResponse {
+   ...
+}
+```
+接口和实现都修改了，最后肯定还要对应修改下业务代码中之前定义的一些控制器。
+
+第一个是控制器的参数，从 framework.Context 修改为 gin.Context， 这里的 gin 是引用 github.com/gohade/hade/framework/gin，还有把之前定义的 Handler 的 error 返回值删除。
+
+第二个是修改里面的调用，因为现在的 Response 方法都带上了一个前缀 I。比如在业务目录下 subject_controller.go 中，把原先的 SubjectListController：
+```go
+
+func SubjectListController(c *framework.Context) error {
+   c.SetOkStatus().Json("ok, SubjectListController")
+   return nil
+}
+```
+修改为：
+```go
+
+func SubjectListController(c *gin.Context) {
+   c.ISetOkStatus().IJson("ok, SubjectListController")
+}
+```
+
+#### 验证
+
+所有修改完成之后，我们可以通过 test 来进行验证，调用 go test ./... 来运行 Gin 程序的所有测试用例，显示成功则表示我们的迁移成功。
+![](_images/0-04.jpg)
+并且我们通过 go build && ./hade 可以看到熟悉的 gin 调试模式的输出：
+![](_images/0-05.jpg)
+
+#### 小结
+
+今天我们讨论几个开源项目的许可协议，比如 Gin 框架使用的 MIT 协议，在明确修改权限后，我们将 Gin 框架迁移进自己手写的 hade 框架，替换前面开发的 Context、路由等模块，为后续拓展做好准备。
+
+在迁移的过程中，我们选择使用复制源码的方式进行替换，并且用了加法最小化的方法，尽量保留了我们的定制化接口。可能有的同学会觉得这种方式比较暴力，但是后续随着我们对框架的改造需求不断增加，这种方式会越来越体现出其优势。
